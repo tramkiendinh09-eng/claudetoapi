@@ -235,3 +235,101 @@ func TestSecureHasKey(t *testing.T) {
 		t.Fatal("empty expected key must reject")
 	}
 }
+
+func TestClassifyErrorBody(t *testing.T) {
+	cases := []struct {
+		body string
+		want ErrorClass
+	}{
+		// geo-blocked 403: proxy problem, must NOT read as banned
+		{`{"error":{"message":"Access to Anthropic models is not allowed from unsupported countries, regions, or territories"}}`, ErrGeoBlocked},
+		{"Your IP is not authorized to make this request", ErrGeoBlocked},
+		// banned: permanent disable
+		{"Your access has been disabled for a suspected violation of our Usage Policy", ErrBanned},
+		{"This organization has been disabled.", ErrBanned},
+		// model access: failover, keep account
+		{`{"error":{"message":"claude-opus-4-5 does not have access to model"}}`, ErrModelAccess},
+		{"is in limited preview and is not available on this account", ErrModelAccess},
+		// billing: long cooldown
+		{"Your credit balance is too low", ErrBilling},
+		{"Your project has exceeded its monthly spending cap", ErrBilling},
+		// unrelated text stays unknown
+		{"invalid request: max_tokens too large", ErrUnknown},
+		{"", ErrUnknown},
+	}
+	for _, c := range cases {
+		if got := classifyErrorBody(c.body); got != c.want {
+			t.Errorf("classify(%q) = %v, want %v", truncateStr(c.body, 50), got, c.want)
+		}
+	}
+}
+
+func TestGeoBlocked403DoesNotDisableAccount(t *testing.T) {
+	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(403)
+		fmt.Fprint(w, `{"type":"error","error":{"type":"forbidden","message":"Access to Anthropic models is not allowed from unsupported countries, regions, or territories."}}`)
+	}))
+	acc := addAccount(t, st, "g1")
+
+	w := postJSON(t, g, "/v1/messages")
+	if w.Code != 503 {
+		t.Fatalf("expected failover to exhaustion (503), got %d", w.Code)
+	}
+	after, _ := st.Get(acc.ID)
+	if after.Status == "error" {
+		t.Fatal("geo-blocked 403 must not permanently disable the account")
+	}
+	if after.RateLimitedUntil == nil || time.Until(*after.RateLimitedUntil) <= 0 {
+		t.Fatalf("geo-blocked 403 should cool the account down: %+v", after.RateLimitedUntil)
+	}
+}
+
+func TestBanned403DisablesAccount(t *testing.T) {
+	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(403)
+		fmt.Fprint(w, `{"error":{"message":"Your access has been disabled for a suspected violation of our Usage Policy."}}`)
+	}))
+	acc := addAccount(t, st, "b1")
+
+	postJSON(t, g, "/v1/messages")
+	after, _ := st.Get(acc.ID)
+	if after.Status != "error" {
+		t.Fatalf("policy-violation 403 must disable, got status %q", after.Status)
+	}
+}
+
+func TestBillingExhaustedFailsOver(t *testing.T) {
+	calls := 0
+	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(402)
+			fmt.Fprint(w, `{"error":{"message":"Your credit balance is too low. Manage your billing here."}}`)
+			return
+		}
+		fmt.Fprint(w, `{"id":"msg_ok","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	addAccount(t, st, "bill1")
+	addAccount(t, st, "bill2")
+
+	w := postJSON(t, g, "/v1/messages")
+	if w.Code != 200 {
+		t.Fatalf("billing failure should fail over, got %d %s", w.Code, w.Body.String())
+	}
+	// whichever account ate the 402 must be long-cooled, none disabled.
+	cooled, disabled := 0, 0
+	for _, a := range st.Snapshot() {
+		if a.Status == "error" {
+			disabled++
+		}
+		if a.RateLimitedUntil != nil && time.Until(*a.RateLimitedUntil) > time.Hour {
+			cooled++
+		}
+	}
+	if disabled != 0 {
+		t.Fatal("billing exhaustion must not permanently disable")
+	}
+	if cooled != 1 {
+		t.Fatalf("expected exactly 1 long-cooled account, got %d", cooled)
+	}
+}

@@ -630,8 +630,22 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 	case resp.StatusCode == http.StatusForbidden:
 		msg := readErrBody(resp)
 		g.recordAttempt(acc, opts, resp.StatusCode, start, usageAcc{})
-		g.setError(acc.ID, "403 forbidden: "+msg)
-		slog.Error("account_403", "account_id", acc.ID, "body", msg)
+		// A geo-blocked 403 is the egress IP's problem, not the account's:
+		// misrouting the account through a bad exit must not kill it.
+		switch classifyErrorBody(msg) {
+		case ErrGeoBlocked:
+			geo := g.geoFor(acc)
+			proxyName := geo.ProxyName
+			if proxyName == "" {
+				proxyName = geo.ProxyURL
+			}
+			g.cooldown(acc.ID, 30*time.Minute, "egress_geo_blocked: "+truncateStr(msg, 160))
+			slog.Error("egress_geo_blocked", "account_id", acc.ID,
+				"proxy", orDefault(proxyName, "direct"), "body", truncateStr(msg, 300))
+		default:
+			g.setError(acc.ID, "403 forbidden: "+msg)
+			slog.Error("account_403", "account_id", acc.ID, "body", msg)
+		}
 		return false
 
 	case resp.StatusCode == http.StatusTooManyRequests:
@@ -652,11 +666,24 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 		return false
 
 	case resp.StatusCode >= 400:
-		// Client-attributable errors pass through unchanged.
+		msg := readErrBody(resp)
 		g.recordAttempt(acc, opts, resp.StatusCode, start, usageAcc{})
+		// Account-attributable failures inside a 4xx body: billing exhausted
+		// cools the account down; model-access gaps only fail this attempt
+		// over to the next account. Everything else is client error and
+		// passes through unchanged.
+		switch classifyErrorBody(msg) {
+		case ErrBilling:
+			g.cooldown(acc.ID, 6*time.Hour, "billing_exhausted: "+truncateStr(msg, 160))
+			slog.Warn("account_billing_exhausted", "account_id", acc.ID, "body", truncateStr(msg, 300))
+			return false
+		case ErrModelAccess:
+			slog.Warn("account_model_access", "account_id", acc.ID, "model", opts.Model, "body", truncateStr(msg, 300))
+			return false
+		}
 		copyHeaders(w, resp)
 		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
+		_, _ = io.WriteString(w, msg)
 		return true
 	}
 
