@@ -24,9 +24,9 @@ type Admin struct {
 	version string
 }
 
-// NewAdmin builds the admin API.
-func NewAdmin(cfg *config.Config, st *store.Store, g *Gateway) *Admin {
-	return &Admin{cfg: cfg, st: st, gw: g, version: "0.4.0"}
+// NewAdmin builds the admin API; ver is reported by /admin/info.
+func NewAdmin(cfg *config.Config, st *store.Store, g *Gateway, ver string) *Admin {
+	return &Admin{cfg: cfg, st: st, gw: g, version: ver}
 }
 
 // Mount registers admin routes on mux. All routes require X-Admin-Key.

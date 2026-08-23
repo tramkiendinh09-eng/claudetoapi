@@ -31,7 +31,7 @@ import (
 var webFS embed.FS
 
 // version is reported by /admin/info and the console.
-const version = "0.4.0"
+const version = "0.4.1"
 
 func main() {
 	cfgPath := flag.String("c", "config.json", "path to config.json")
@@ -55,7 +55,7 @@ func main() {
 
 	gateway := gw.New(cfg, st)
 	gateway.SetTelemetry(gw.NewTelemetryManager(gateway))
-	admin := gw.NewAdmin(cfg, st, gateway)
+	admin := gw.NewAdmin(cfg, st, gateway, version)
 
 	mux := http.NewServeMux()
 
