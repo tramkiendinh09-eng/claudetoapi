@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -34,14 +35,9 @@ type Gateway struct {
 	// slots enforces per-account concurrency caps.
 	slots sync.Map
 
-	usage struct {
-		mu     sync.Mutex
-		input  map[int64]int64
-		output map[int64]int64
-		reqs   map[int64]int64
-		lastIn int64
-		lastOut int64
-	}
+	// ledger records per-account usage: today/total aggregates plus a
+	// per-request log with separate prompt-cache write/read counters.
+	ledger *usageLedger
 }
 
 func New(cfg *config.Config, st *store.Store) *Gateway {
@@ -51,10 +47,20 @@ func New(cfg *config.Config, st *store.Store) *Gateway {
 		chain:     NewChain(),
 		telemetry: nil,
 	}
-	g.usage.input = map[int64]int64{}
-	g.usage.output = map[int64]int64{}
-	g.usage.reqs = map[int64]int64{}
+	g.ledger = newUsageLedger(filepath.Join(cfg.AccountsDir, "usage_history.json"))
+	g.ledger.startSaver()
 	return g
+}
+
+// CloseUsage stops the ledger saver after a final flush.
+func (g *Gateway) CloseUsage() { g.ledger.close() }
+
+// UsageAggregates returns per-account today/total counters (admin endpoint).
+func (g *Gateway) UsageAggregates() map[int64]UsageAgg { return g.ledger.aggregates() }
+
+// UsageRecords returns the newest request records, optionally filtered by account.
+func (g *Gateway) UsageRecords(accountID int64, limit int) []UsageRecord {
+	return g.ledger.recordsFor(accountID, limit)
 }
 
 // Telemetry returns the telemetry manager (lazily wired by main).
@@ -405,6 +411,7 @@ type forwardOpts struct {
 // when the caller should fail over to another account.
 func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store.Account, body map[string]any, opts forwardOpts) bool {
 	ctx := r.Context()
+	start := time.Now()
 
 	// Per-account concurrency guard: real CLI processes run 1-3 parallel
 	// sessions; a pool account fanning out to dozens at once is a pattern.
@@ -546,6 +553,7 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
 		// Invalidate cached token; short cooldown lets the refresher heal it.
+		g.recordAttempt(acc, opts, resp.StatusCode, start, usageAcc{})
 		_ = g.st.Update(acc.ID, func(a *store.Account) { a.Credentials.AccessToken = "" })
 		g.cooldown(acc.ID, 10*time.Minute, "oauth_401")
 		_ = resp.Body.Close()
@@ -553,11 +561,13 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 
 	case resp.StatusCode == http.StatusForbidden:
 		msg := readErrBody(resp)
+		g.recordAttempt(acc, opts, resp.StatusCode, start, usageAcc{})
 		g.setError(acc.ID, "403 forbidden: "+msg)
 		slog.Error("account_403", "account_id", acc.ID, "body", msg)
 		return false
 
 	case resp.StatusCode == http.StatusTooManyRequests:
+		g.recordAttempt(acc, opts, resp.StatusCode, start, usageAcc{})
 		decision := Parse429(resp.Header, time.Now())
 		if mw, ok := ParseModelWindow(resp.Header, time.Now()); ok {
 			slog.Warn("model_window_limited", "account_id", acc.ID, "window", mw.Window)
@@ -568,12 +578,14 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 		return false
 
 	case resp.StatusCode == 529 || resp.StatusCode >= 500:
+		g.recordAttempt(acc, opts, resp.StatusCode, start, usageAcc{})
 		slog.Warn("upstream_5xx", "account_id", acc.ID, "status", resp.StatusCode)
 		_ = resp.Body.Close()
 		return false
 
 	case resp.StatusCode >= 400:
 		// Client-attributable errors pass through unchanged.
+		g.recordAttempt(acc, opts, resp.StatusCode, start, usageAcc{})
 		copyHeaders(w, resp)
 		w.WriteHeader(resp.StatusCode)
 		_, _ = io.Copy(w, resp.Body)
@@ -584,27 +596,46 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 	g.chain.Bind(opts.SessionHash, acc.ID)
 	copyHeaders(w, resp)
 	if opts.Stream {
-		g.relaySSE(w, resp, acc.ID)
+		u := g.relaySSE(w, resp)
+		g.recordAttempt(acc, opts, resp.StatusCode, start, u)
 	} else {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(data)
-		g.recordUsage(acc.ID, data, nil)
+		g.recordAttempt(acc, opts, resp.StatusCode, start, parseFinalUsage(data))
 	}
 	// Emit the same per-query telemetry event the real CLI records.
 	if g.telemetry != nil {
-		if in, out := g.lastUsageFor(acc.ID); in >= 0 {
+		if in, out := g.ledger.lastUsage(); in >= 0 {
 			g.telemetry.NotifyQuery(acc, opts.Model, opts.Stream, in, out, hasThinking(body))
 		}
 	}
 	return true
 }
 
+// recordAttempt writes one per-account request record; token fields stay zero
+// when upstream never returned usage (failed attempt).
+func (g *Gateway) recordAttempt(acc *store.Account, opts forwardOpts, status int, start time.Time, u usageAcc) {
+	g.ledger.record(UsageRecord{
+		Time: start, AccountID: acc.ID, AccountName: acc.Name,
+		Model: opts.Model, Stream: opts.Stream, Status: status,
+		DurationMS: time.Since(start).Milliseconds(),
+		Input: u.input, Output: u.output, CacheWrite: u.cacheWrite, CacheRead: u.cacheRead,
+	})
+}
+
+// usageAcc accumulates the usage object of one upstream response. input and
+// the cache counters are absolute per message (last value wins); output_tokens
+// in message_delta is cumulative, so it is tracked as a running max.
+type usageAcc struct {
+	input, output, cacheWrite, cacheRead int64
+}
+
 // relaySSE streams events to the client and harvests usage.
-func (g *Gateway) relaySSE(w http.ResponseWriter, resp *http.Response, accountID int64) {
+func (g *Gateway) relaySSE(w http.ResponseWriter, resp *http.Response) usageAcc {
 	flusher, _ := w.(http.Flusher)
 	w.WriteHeader(http.StatusOK)
-	var usageIn, usageOut int64
+	var u usageAcc
 	buf := make([]byte, 32*1024)
 	var line strings.Builder
 	for {
@@ -615,17 +646,18 @@ func (g *Gateway) relaySSE(w http.ResponseWriter, resp *http.Response, accountID
 			if flusher != nil {
 				flusher.Flush()
 			}
-			usageIn, usageOut = scanUsage(line, chunk, usageIn, usageOut)
+			u = scanUsage(line, chunk, u)
 		}
 		if err != nil {
 			break
 		}
 	}
-	g.recordUsageCounts(accountID, usageIn, usageOut)
+	return u
 }
 
-// scanUsage extracts input/output tokens from SSE usage events.
-func scanUsage(acc strings.Builder, chunk []byte, in, out int64) (int64, int64) {
+// scanUsage extracts the usage object from SSE events: message_start carries
+// input + cache counters, message_delta the cumulative output count.
+func scanUsage(acc strings.Builder, chunk []byte, u usageAcc) usageAcc {
 	for _, b := range chunk {
 		if b == '\n' {
 			line := strings.TrimSpace(acc.String())
@@ -642,16 +674,16 @@ func scanUsage(acc strings.Builder, chunk []byte, in, out int64) (int64, int64) 
 				}
 				if json.Unmarshal([]byte(strings.TrimPrefix(line, "data:")), &ev) == nil && ev.Usage != nil {
 					if ev.Usage.InputTokens != nil {
-						in = *ev.Usage.InputTokens
+						u.input = *ev.Usage.InputTokens
 					}
-					if ev.Usage.OutputTokens != nil {
-						out += *ev.Usage.OutputTokens
+					if ev.Usage.OutputTokens != nil && *ev.Usage.OutputTokens > u.output {
+						u.output = *ev.Usage.OutputTokens
 					}
 					if ev.Usage.CacheCreationInputTokens != nil {
-						in += *ev.Usage.CacheCreationInputTokens
+						u.cacheWrite = *ev.Usage.CacheCreationInputTokens
 					}
 					if ev.Usage.CacheReadInputTokens != nil {
-						in += *ev.Usage.CacheReadInputTokens
+						u.cacheRead = *ev.Usage.CacheReadInputTokens
 					}
 				}
 			}
@@ -659,57 +691,36 @@ func scanUsage(acc strings.Builder, chunk []byte, in, out int64) (int64, int64) 
 		}
 		acc.WriteByte(b)
 	}
-	return in, out
+	return u
 }
 
-func (g *Gateway) recordUsage(accountID int64, data []byte, _ []byte) {
+// parseFinalUsage reads the usage object out of a non-streaming response body.
+func parseFinalUsage(data []byte) usageAcc {
 	var v struct {
 		Usage *struct {
-			InputTokens  *int64 `json:"input_tokens"`
-			OutputTokens *int64 `json:"output_tokens"`
+			InputTokens              *int64 `json:"input_tokens"`
+			OutputTokens             *int64 `json:"output_tokens"`
+			CacheCreationInputTokens *int64 `json:"cache_creation_input_tokens"`
+			CacheReadInputTokens     *int64 `json:"cache_read_input_tokens"`
 		} `json:"usage"`
 	}
-	if json.Unmarshal(data, &v) == nil && v.Usage != nil {
-		in, out := int64(0), int64(0)
-		if v.Usage.InputTokens != nil {
-			in = *v.Usage.InputTokens
-		}
-		if v.Usage.OutputTokens != nil {
-			out = *v.Usage.OutputTokens
-		}
-		g.recordUsageCounts(accountID, in, out)
+	if json.Unmarshal(data, &v) != nil || v.Usage == nil {
+		return usageAcc{}
 	}
-}
-
-// recordUsageCounts accumulates per-account usage and remembers the most
-// recent (input, output) pair so the telemetry path can report per-query
-// numbers like the CLI does.
-func (g *Gateway) recordUsageCounts(accountID int64, in, out int64) {
-	g.usage.mu.Lock()
-	defer g.usage.mu.Unlock()
-	g.usage.input[accountID] += in
-	g.usage.output[accountID] += out
-	g.usage.reqs[accountID]++
-	g.usage.lastIn = in
-	g.usage.lastOut = out
-}
-
-// lastUsageFor returns the most recently recorded query usage.
-func (g *Gateway) lastUsageFor(accountID int64) (int64, int64) {
-	g.usage.mu.Lock()
-	defer g.usage.mu.Unlock()
-	return g.usage.lastIn, g.usage.lastOut
-}
-
-// UsageSnapshot returns per-account counters (admin endpoint).
-func (g *Gateway) UsageSnapshot() map[int64][3]int64 {
-	g.usage.mu.Lock()
-	defer g.usage.mu.Unlock()
-	out := map[int64][3]int64{}
-	for id, r := range g.usage.reqs {
-		out[id] = [3]int64{r, g.usage.input[id], g.usage.output[id]}
+	var u usageAcc
+	if v.Usage.InputTokens != nil {
+		u.input = *v.Usage.InputTokens
 	}
-	return out
+	if v.Usage.OutputTokens != nil {
+		u.output = *v.Usage.OutputTokens
+	}
+	if v.Usage.CacheCreationInputTokens != nil {
+		u.cacheWrite = *v.Usage.CacheCreationInputTokens
+	}
+	if v.Usage.CacheReadInputTokens != nil {
+		u.cacheRead = *v.Usage.CacheReadInputTokens
+	}
+	return u
 }
 
 // ---- small helpers ----

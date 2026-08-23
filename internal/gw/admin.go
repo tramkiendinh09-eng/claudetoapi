@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,7 +26,7 @@ type Admin struct {
 
 // NewAdmin builds the admin API.
 func NewAdmin(cfg *config.Config, st *store.Store, g *Gateway) *Admin {
-	return &Admin{cfg: cfg, st: st, gw: g, version: "0.1.0"}
+	return &Admin{cfg: cfg, st: st, gw: g, version: "0.3.0"}
 }
 
 // Mount registers admin routes on mux. All routes require X-Admin-Key.
@@ -46,6 +47,7 @@ func (a *Admin) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/oauth/url", wrap(a.oauthBegin))
 	mux.HandleFunc("POST /admin/oauth/complete", wrap(a.oauthComplete))
 	mux.HandleFunc("GET /admin/usage", wrap(a.usage))
+	mux.HandleFunc("GET /admin/usage/logs", wrap(a.usageLogs))
 	mux.HandleFunc("GET /admin/info", wrap(a.info))
 	mux.HandleFunc("PATCH /admin/accounts/{id}", wrap(a.patch))
 	mux.HandleFunc("POST /admin/proxies/test", wrap(a.testProxy))
@@ -435,8 +437,25 @@ func (a *Admin) oauthComplete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"id": acc.ID, "name": acc.Name, "email": acc.Extra.Email})
 }
 
+// usage returns per-account today/total aggregates:
+// {account_id: {today:{...}, total:{reqs,errors,input,output,cache_write,cache_read}}}.
 func (a *Admin) usage(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"usage": a.gw.UsageSnapshot()})
+	writeJSON(w, http.StatusOK, map[string]any{"usage": a.gw.UsageAggregates()})
+}
+
+// usageLogs returns newest-first per-request records.
+// Query: ?account_id=&limit= (default 100, max 2000).
+func (a *Admin) usageLogs(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit := 100
+	if v, err := strconv.Atoi(q.Get("limit")); err == nil && v > 0 {
+		limit = v
+	}
+	accountID := int64(0)
+	if v, err := strconv.ParseInt(q.Get("account_id"), 10, 64); err == nil && v > 0 {
+		accountID = v
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"logs": a.gw.UsageRecords(accountID, limit)})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

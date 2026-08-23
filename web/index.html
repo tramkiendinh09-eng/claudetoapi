@@ -122,11 +122,32 @@ code{background:var(--panel2);padding:2px 7px;border-radius:5px;font-family:Cons
         <table id="accTable">
         <thead><tr>
           <th>ID</th><th>名称</th><th>邮箱</th><th>状态</th><th>入口</th>
-          <th>用量(入/出 tokens)</th><th>出口 IP / 时区</th><th style="text-align:right">操作</th>
+          <th>用量 今日 / 累计(入 + 缓存写 + 缓存读 / 出)</th><th>出口 IP / 时区</th><th style="text-align:right">操作</th>
         </tr></thead>
         <tbody><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
       </table>
     </div>
+  </div>
+
+  <div class="card">
+    <h3>请求日志
+      <span class="row" style="gap:8px">
+        <select id="logFilter" style="width:auto" onchange="renderLogs()">
+          <option value="0">全部账号</option>
+        </select>
+        <button class="btn sm" onclick="loadLogs()">刷新</button>
+      </span>
+    </h3>
+    <div style="overflow-x:auto">
+      <table id="logTable">
+        <thead><tr>
+          <th>时间</th><th>账号</th><th>模型</th><th>状态</th><th>耗时</th>
+          <th>输入</th><th>缓存写</th><th>缓存读</th><th>输出</th>
+        </tr></thead>
+        <tbody><tr><td colspan="9" class="empty">暂无请求记录</td></tr></tbody>
+      </table>
+    </div>
+    <div class="hint">每号最多保留最近 2000 条;缓存写=cache_creation_input_tokens,缓存读=cache_read_input_tokens。数据持久化在 accounts 目录 usage_history.json,重启不丢。</div>
   </div>
 
   <div class="card">
@@ -188,6 +209,8 @@ let KEY = localStorage.getItem('ctapi_admin_key') || '';
 let proxyTesting = false;
 const proxyStatus = {}; // name -> html, survives auto re-render
 let oauthState = '';
+let usageLogs = [];      // newest-first request records
+let accNameMap = {};     // id -> name for log rendering
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -228,13 +251,16 @@ function logout() {
 
 async function refreshAll() {
   try {
-    const [info, accs, usage] = await Promise.all([
+    const [info, accs, usage, logs] = await Promise.all([
       api('/admin/info'),
       api('/admin/accounts'),
       api('/admin/usage').catch(() => ({usage: {}})),
+      api('/admin/usage/logs?limit=200').catch(() => ({logs: []})),
     ]);
     renderInfo(info);
     renderAccounts(accs.accounts || [], usage.usage || {});
+    usageLogs = logs.logs || [];
+    renderLogs();
   } catch (e) { toast(e.message, 'err'); }
 }
 
@@ -293,16 +319,31 @@ async function testAllProxies() {
   }
 }
 
+function fmtTok(n) {
+  if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1) + 'k';
+  return String(n || 0);
+}
+
 function renderAccounts(accs, usage) {
   const now = Date.now();
   let active = 0, cooling = 0, reqs = 0;
+  accNameMap = {};
+  const filterSel = $('logFilter');
+  const curFilter = filterSel.value;
+  accs.forEach(a => { accNameMap[a.id] = a.name; });
+  // rebuild the account filter options preserving the current selection
+  filterSel.innerHTML = '<option value="0">全部账号</option>' +
+    accs.map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
+  filterSel.value = accs.some(a => String(a.id) === curFilter) ? curFilter : '0';
   const tb = $('accTable').querySelector('tbody');
   if (!accs.length) {
     tb.innerHTML = '<tr><td colspan="8" class="empty">还没有账号,点右上角「添加账号」</td></tr>';
   } else {
     tb.innerHTML = accs.map(a => {
-      const u = usage[a.id] || [0, 0, 0];
-      reqs += u[0];
+      const agg = usage[a.id] || {};
+      const t = agg.total || {}, d = agg.today || {};
+      reqs += (t.reqs || 0);
       let status, cls;
       if (a.status === 'error') { status = '错误: ' + (a.error || ''); cls = 'err'; }
       else if (a.rate_limited_until && new Date(a.rate_limited_until) > new Date()) {
@@ -316,7 +357,10 @@ function renderAccounts(accs, usage) {
         <td class="muted">${esc(a.email || '—')}</td>
         <td><span class="badge ${cls}">${esc(status)}</span></td>
         <td class="mono">${esc(a.entrypoint || 'cli')}</td>
-        <td class="mono">${u[1]||0} / ${u[2]||0} <span class="muted">(${u[0]} 次)</span></td>
+        <td class="mono">
+          <div>今日 ${fmtTok(d.input)} + ${fmtTok(d.cache_write)}W + ${fmtTok(d.cache_read)}R / ${fmtTok(d.output)} <span class="muted">(${d.reqs||0} 次${d.errors ? ', ' + d.errors + ' 错' : ''})</span></div>
+          <div class="muted">累计 ${fmtTok(t.input)} + ${fmtTok(t.cache_write)}W + ${fmtTok(t.cache_read)}R / ${fmtTok(t.output)} <span>(${t.reqs||0} 次${t.errors ? ', ' + t.errors + ' 错' : ''})</span></div>
+        </td>
         <td class="mono">${esc(a.proxy || '默认')}<br><small class="muted">${esc(a.timezone ? a.timezone + ' · ' + a.language : '无时区绑定')}</small></td>
         <td style="text-align:right;white-space:nowrap">
           <button class="btn sm" onclick="editAccount(${a.id}, '${esc(a.proxy || '')}', '${esc(a.entrypoint || 'cli')}')">编辑</button>
@@ -330,6 +374,38 @@ function renderAccounts(accs, usage) {
   $('stActive').textContent = active;
   $('stCool').textContent = cooling;
   $('stReqs').textContent = reqs;
+}
+
+async function loadLogs() {
+  try {
+    const r = await api('/admin/usage/logs?limit=200');
+    usageLogs = r.logs || [];
+    renderLogs();
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+function renderLogs() {
+  const tb = $('logTable').querySelector('tbody');
+  const f = $('logFilter').value;
+  const rows = usageLogs.filter(l => f === '0' || String(l.account_id) === f);
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="9" class="empty">暂无请求记录</td></tr>';
+    return;
+  }
+  tb.innerHTML = rows.slice(0, 100).map(l => {
+    const cls = l.status >= 400 ? 'err' : (l.status >= 200 && l.status < 300 ? 'ok' : 'warn');
+    return `<tr>
+      <td class="mono muted">${new Date(l.time).toLocaleTimeString()}</td>
+      <td>${esc(accNameMap[l.account_id] || ('#' + l.account_id))}</td>
+      <td class="mono">${esc(l.model || '—')}</td>
+      <td><span class="badge ${cls}">${l.status}${l.stream ? ' · SSE' : ''}</span></td>
+      <td class="mono">${(l.duration_ms/1000).toFixed(1)}s</td>
+      <td class="mono">${fmtTok(l.input)}</td>
+      <td class="mono" style="color:var(--warn)">${fmtTok(l.cache_write)}</td>
+      <td class="mono" style="color:var(--cool)">${fmtTok(l.cache_read)}</td>
+      <td class="mono">${fmtTok(l.output)}</td>
+    </tr>`;
+  }).join('');
 }
 
 async function refreshToken(id) {

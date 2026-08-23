@@ -27,7 +27,7 @@ import (
 var webFS embed.FS
 
 // version is reported by /admin/info and the console.
-const version = "0.1.0"
+const version = "0.3.0"
 
 func main() {
 	cfgPath := flag.String("c", "config.json", "path to config.json")
@@ -84,7 +84,8 @@ func main() {
 		}
 	}()
 
-	// Graceful shutdown: flush telemetry batches on exit.
+	// Graceful shutdown: flush telemetry batches and the usage ledger.
+	defer gateway.CloseUsage()
 	defer gateway.Telemetry().StopAll()
 
 	slog.Info("claudetoapi listening", "addr", cfg.Listen, "accounts", len(st.Snapshot()))
