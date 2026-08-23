@@ -382,18 +382,22 @@ function renderAccounts(accs, usage) {
       const agg = usage[a.id] || {};
       const t = agg.total || {}, d = agg.today || {};
       reqs += (t.reqs || 0);
-      let status, cls;
-      if (a.status === 'error') { status = '错误: ' + (a.error || ''); cls = 'err'; }
+      let status, cls, actions = '';
+      if (a.status === 'error') {
+        status = '错误: ' + (a.error || ''); cls = 'err';
+        actions = `<button class="btn sm" onclick="clearAccountError(${a.id})">恢复</button>`;
+      }
       else if (a.rate_limited_until && new Date(a.rate_limited_until) > new Date()) {
         const left = Math.ceil((new Date(a.rate_limited_until) - now) / 60000);
         status = '冷却 ' + (left >= 60 ? Math.floor(left/60) + '时' + left%60 + '分' : left + '分');
         cls = 'cool'; cooling++;
+        actions = `<button class="btn sm" onclick="clearAccountError(${a.id})">解除冷却</button>`;
       } else { status = '可用'; cls = 'ok'; active++; }
       return `<tr>
         <td class="mono">${a.id}</td>
         <td>${esc(a.name)}</td>
         <td class="muted">${esc(a.email || '—')}</td>
-        <td><span class="badge ${cls}">${esc(status)}</span></td>
+        <td><span class="badge ${cls}" title="${esc(status)}">${esc(status.length > 30 ? status.slice(0, 30) + '…' : status)}</span></td>
         <td class="mono">${esc(a.entrypoint || 'cli')}</td>
         <td class="mono">
           <div>今日 ${fmtTok(d.input)} + ${fmtTok(d.cache_write)}W + ${fmtTok(d.cache_read)}R / ${fmtTok(d.output)} <span class="muted">(${d.reqs||0} 次${d.errors ? ', ' + d.errors + ' 错' : ''})</span></div>
@@ -401,6 +405,7 @@ function renderAccounts(accs, usage) {
         </td>
         <td class="mono">${esc(a.proxy || '默认')}<br><small class="muted">${esc(a.timezone ? a.timezone + ' · ' + a.language : '无时区绑定')}</small></td>
         <td style="text-align:right;white-space:nowrap">
+          ${actions}
           <button class="btn sm" onclick='openEdit(${JSON.stringify({id:a.id, name:a.name, proxy:(a.proxy==="默认"?"":a.proxy), entrypoint:a.entrypoint, concurrency:a.concurrency})})'>编辑</button>
           <button class="btn sm" onclick="refreshToken(${a.id})">刷新token</button>
           <button class="btn sm danger" onclick="delAccount(${a.id}, '${esc(a.name)}')">删除</button>
@@ -452,6 +457,13 @@ function renderLogs() {
       <td class="mono">${fmtTok(l.output)}</td>
     </tr>`;
   }).join('');
+}
+
+async function clearAccountError(id) {
+  try {
+    await api(`/admin/accounts/${id}`, {method: 'PATCH', body: JSON.stringify({clear_error: true})});
+    toast('已恢复', 'ok'); refreshAll();
+  } catch (e) { toast(e.message, 'err'); }
 }
 
 async function refreshToken(id) {

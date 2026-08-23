@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -205,4 +206,32 @@ func parseInt(s string) int {
 	var n int
 	fmt.Sscanf(s, "%d", &n)
 	return n
+}
+
+func TestPerAccountTokenLocks(t *testing.T) {
+	g := &Gateway{tokenLock: map[int64]*sync.Mutex{}}
+	a := g.lockAccount(1)
+	b := g.lockAccount(2)
+	a.Lock()
+	if b.TryLock() == false {
+		t.Fatal("lock for account 2 should be independent of account 1")
+	}
+	b.Unlock()
+	a.Unlock()
+	// same account returns the same lock
+	if g.lockAccount(1) != a {
+		t.Fatal("lock identity must be stable per account")
+	}
+}
+
+func TestSecureHasKey(t *testing.T) {
+	if !secureHasKey("k1", []string{"k1", "k2"}) {
+		t.Fatal("valid key rejected")
+	}
+	if secureHasKey("k1", []string{}) || secureHasKey("", []string{"k1"}) || secureHasKey("k1", []string{"k2"}) {
+		t.Fatal("invalid key accepted")
+	}
+	if secureHasKey("x", []string{""}) {
+		t.Fatal("empty expected key must reject")
+	}
 }

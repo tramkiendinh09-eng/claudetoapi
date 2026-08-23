@@ -34,8 +34,10 @@ type Gateway struct {
 	// forwarding pipeline at a fake upstream.
 	upstreamBase string
 
-	// tokenMu serializes refresh per account.
-	tokenMu sync.Mutex
+	// tokenMu serializes refresh per account (keyed by account ID so one
+	// slow refresh never blocks another account's traffic).
+	tokenMu   sync.Mutex
+	tokenLock map[int64]*sync.Mutex
 	// slots enforces per-account concurrency caps.
 	slots sync.Map
 
@@ -54,7 +56,20 @@ func New(cfg *config.Config, st *store.Store) *Gateway {
 	}
 	g.ledger = newUsageLedger(filepath.Join(cfg.AccountsDir, "usage_history.json"))
 	g.ledger.startSaver()
+	g.tokenLock = map[int64]*sync.Mutex{}
 	return g
+}
+
+// lockAccount takes the per-account token mutex.
+func (g *Gateway) lockAccount(id int64) *sync.Mutex {
+	g.tokenMu.Lock()
+	defer g.tokenMu.Unlock()
+	mu, ok := g.tokenLock[id]
+	if !ok {
+		mu = &sync.Mutex{}
+		g.tokenLock[id] = mu
+	}
+	return mu
 }
 
 // CloseUsage stops the ledger saver after a final flush.
@@ -105,8 +120,9 @@ func (g *Gateway) releaseSlot(acc *store.Account) {
 // accessToken returns a valid token, refreshing when near expiry. A failed
 // refresh without a refresh_token disables the account.
 func (g *Gateway) accessToken(ctx context.Context, acc *store.Account) (string, error) {
-	g.tokenMu.Lock()
-	defer g.tokenMu.Unlock()
+	mu := g.lockAccount(acc.ID)
+	mu.Lock()
+	defer mu.Unlock()
 
 	if acc.Credentials.AccessToken != "" {
 		if exp, err := time.Parse(time.RFC3339, acc.Credentials.ExpiresAt); err == nil {
@@ -680,6 +696,16 @@ func (g *Gateway) recordAttempt(acc *store.Account, opts forwardOpts, status int
 		DurationMS: time.Since(start).Milliseconds(),
 		Input: u.input, Output: u.output, CacheWrite: u.cacheWrite, CacheRead: u.cacheRead,
 	})
+	if status >= 400 {
+		slog.Warn("forward",
+			"account", acc.Name, "model", opts.Model, "status", status,
+			"stream", opts.Stream, "ms", time.Since(start).Milliseconds())
+		return
+	}
+	slog.Info("forward",
+		"account", acc.Name, "model", opts.Model, "status", status,
+		"stream", opts.Stream, "ms", time.Since(start).Milliseconds(),
+		"in", u.input, "out", u.output, "cache_w", u.cacheWrite, "cache_r", u.cacheRead)
 }
 
 // usageAcc accumulates the usage object of one upstream response. input and

@@ -93,6 +93,7 @@ func main() {
 		Addr:              cfg.Listen,
 		Handler:           withCORS(mux),
 		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	// Serve until SIGINT/SIGTERM, then drain: stop accepting, let in-flight
@@ -139,11 +140,13 @@ func withCORS(next http.Handler) http.Handler {
 	})
 }
 
-// apiKeyAuth wraps a handler with API-key verification.
+// apiKeyAuth wraps a handler with API-key verification (constant-time).
 func apiKeyAuth(cfg *config.Config) func(http.HandlerFunc) http.HandlerFunc {
-	keys := map[string]bool{}
+	keys := make([]string, 0, len(cfg.APIKeys))
 	for _, k := range cfg.APIKeys {
-		keys[strings.TrimSpace(k)] = true
+		if k = strings.TrimSpace(k); k != "" {
+			keys = append(keys, k)
+		}
 	}
 	return func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -154,7 +157,7 @@ func apiKeyAuth(cfg *config.Config) func(http.HandlerFunc) http.HandlerFunc {
 			if token == "" {
 				token = r.Header.Get("x-api-key")
 			}
-			if token == "" || !keys[token] {
+			if token == "" || !gw.SecureHasKey(token, keys) {
 				w.Header().Set("content-type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
 				_, _ = w.Write([]byte(`{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`))

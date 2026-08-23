@@ -33,7 +33,7 @@ func NewAdmin(cfg *config.Config, st *store.Store, g *Gateway) *Admin {
 func (a *Admin) Mount(mux *http.ServeMux) {
 	wrap := func(h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("X-Admin-Key") != a.cfg.AdminKey {
+			if !secureEqual(r.Header.Get("X-Admin-Key"), a.cfg.AdminKey) {
 				writeErr(w, http.StatusUnauthorized, "authentication_error", "invalid admin key")
 				return
 			}
