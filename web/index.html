@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claudetoapi · 控制台</title>
+<style>
+:root{
+  --bg:#0f1117;--panel:#171a23;--panel2:#1e2230;--line:#2a2f3f;
+  --text:#e6e9f0;--muted:#8b93a7;--acc:#6c8cff;--acc2:#8b5cf6;
+  --ok:#34d399;--warn:#fbbf24;--err:#f87171;--cool:#60a5fa;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,-apple-system,sans-serif;font-size:14px;min-height:100vh}
+a{color:var(--acc);text-decoration:none}
+.wrap{max-width:1080px;margin:0 auto;padding:24px 20px 60px}
+header{display:flex;align-items:center;justify-content:space-between;margin-bottom:22px;gap:12px;flex-wrap:wrap}
+.logo{display:flex;align-items:center;gap:10px;font-size:19px;font-weight:700}
+.logo .dot{width:12px;height:12px;border-radius:3px;background:linear-gradient(135deg,var(--acc),var(--acc2))}
+.logo small{color:var(--muted);font-weight:400;font-size:12px;margin-left:4px}
+.badge{display:inline-flex;align-items:center;gap:5px;padding:2px 10px;border-radius:99px;font-size:12px;border:1px solid var(--line);color:var(--muted)}
+.badge.ok{color:var(--ok);border-color:rgba(52,211,153,.35)}
+.badge.err{color:var(--err);border-color:rgba(248,113,113,.35)}
+.badge.cool{color:var(--cool);border-color:rgba(96,165,250,.35)}
+.badge.warn{color:var(--warn);border-color:rgba(251,191,36,.35)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:16px}
+.card h3{font-size:14px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between}
+.btn{background:var(--panel2);color:var(--text);border:1px solid var(--line);padding:7px 14px;border-radius:8px;cursor:pointer;font-size:13px;transition:.15s}
+.btn:hover{border-color:var(--acc);color:var(--acc)}
+.btn.primary{background:linear-gradient(135deg,var(--acc),var(--acc2));border:none;color:#fff;font-weight:600}
+.btn.danger:hover{border-color:var(--err);color:var(--err)}
+.btn.sm{padding:4px 10px;font-size:12px;border-radius:6px}
+input,select,textarea{background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:8px 12px;border-radius:8px;font-size:13px;width:100%;outline:none}
+input:focus,textarea:focus{border-color:var(--acc)}
+label{display:block;color:var(--muted);font-size:12px;margin:12px 0 6px}
+table{width:100%;border-collapse:collapse}
+th{color:var(--muted);font-size:12px;font-weight:500;text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:10px;border-bottom:1px solid var(--line);vertical-align:middle}
+tr:last-child td{border-bottom:none}
+.muted{color:var(--muted)}
+.mono{font-family:Consolas,monospace;font-size:12px}
+.empty{color:var(--muted);text-align:center;padding:34px 0}
+.grid3{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px}
+.stat{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:14px}
+.stat .v{font-size:22px;font-weight:700;margin-top:4px}
+.stat .v small{font-size:12px;color:var(--muted);font-weight:400}
+/* login gate */
+#gate{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:50}
+#gate .box{width:360px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:28px}
+#gate h2{font-size:17px;margin-bottom:6px}
+#gate p{color:var(--muted);font-size:12.5px;margin-bottom:18px}
+/* modal */
+#modal{position:fixed;inset:0;background:rgba(5,7,12,.7);display:none;align-items:flex-start;justify-content:center;z-index:40;padding:40px 16px;overflow:auto}
+#modal.on{display:flex}
+#modal .box{width:560px;max-width:100%;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px}
+.tabs{display:flex;gap:6px;margin-bottom:16px;border-bottom:1px solid var(--line)}
+.tabs button{background:none;border:none;color:var(--muted);padding:8px 14px;cursor:pointer;font-size:13px;border-bottom:2px solid transparent}
+.tabs button.on{color:var(--acc);border-bottom-color:var(--acc)}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+#toast{position:fixed;right:20px;bottom:20px;z-index:60;display:flex;flex-direction:column;gap:8px}
+.toast{background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--acc);padding:10px 16px;border-radius:8px;font-size:13px;max-width:420px;animation:in .2s}
+.toast.err{border-left-color:var(--err)} .toast.ok{border-left-color:var(--ok)}
+@keyframes in{from{opacity:0;transform:translateY(6px)}to{opacity:1}}
+code{background:var(--panel2);padding:2px 7px;border-radius:5px;font-family:Consolas,monospace;font-size:12px}
+.hint{font-size:12px;color:var(--muted);margin-top:8px;line-height:1.7}
+</style>
+</head>
+<body>
+
+<div id="gate">
+  <div class="box">
+    <h2>claudetoapi 控制台</h2>
+    <p>输入管理密钥(X-Admin-Key,见 config.json 的 admin_key)</p>
+    <input id="keyInput" type="password" placeholder="admin key" autofocus>
+    <div style="margin-top:14px;display:flex;gap:8px">
+      <button class="btn primary" style="flex:1" onclick="login()">进入</button>
+    </div>
+    <div id="gateErr" class="hint" style="color:var(--err)"></div>
+  </div>
+</div>
+
+<div class="wrap" id="app" style="display:none">
+  <header>
+    <div class="logo"><span class="dot"></span>claudetoapi<small id="verInfo"></small></div>
+    <div class="row">
+      <span class="badge" id="listenBadge">—</span>
+      <button class="btn sm" onclick="logout()">退出</button>
+    </div>
+  </header>
+
+  <div class="card">
+    <h3>概览 <button class="btn sm" onclick="refreshAll()">刷新</button></h3>
+    <div class="grid3">
+      <div class="stat"><div class="muted">账号总数</div><div class="v" id="stTotal">0</div></div>
+      <div class="stat"><div class="muted">可用</div><div class="v" id="stActive" style="color:var(--ok)">0</div></div>
+      <div class="stat"><div class="muted">冷却/限流</div><div class="v" id="stCool" style="color:var(--cool)">0</div></div>
+      <div class="stat"><div class="muted">累计请求</div><div class="v" id="stReqs">0</div></div>
+      <div class="stat"><div class="muted">伪装版本</div><div class="v" id="stProfile" style="font-size:15px">—</div></div>
+      <div class="stat"><div class="muted">连接复用(命中/新建)</div><div class="v" id="stPool" style="font-size:15px">—</div></div>
+      <div class="stat"><div class="muted">遥测旁路</div><div class="v" id="stTelemetry" style="font-size:15px">—</div></div>
+    </div>
+  </div>
+
+  <div class="card" id="proxyCard" style="display:none">
+    <h3>代理池(IP · 时区 · 语言一致性)
+      <button class="btn sm" onclick="testAllProxies()">测试连通</button>
+    </h3>
+    <div style="overflow-x:auto">
+      <table id="proxyTable">
+        <thead><tr><th>名称</th><th>时区</th><th>accept-language</th><th>出口(脱敏)</th><th>状态</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="hint">在 config.json 的 <code>proxies</code> 里定义;把账号绑定到某个名称后,该账号的 accept-language、提示词内日期都会自动对齐这个出口 IP 的时区与地区。</div>
+  </div>
+
+  <div class="card">
+    <h3>账号
+      <button class="btn primary sm" onclick="openAdd()">+ 添加账号</button>
+    </h3>
+    <div style="overflow-x:auto">
+        <table id="accTable">
+        <thead><tr>
+          <th>ID</th><th>名称</th><th>邮箱</th><th>状态</th><th>入口</th>
+          <th>用量(入/出 tokens)</th><th>出口 IP / 时区</th><th style="text-align:right">操作</th>
+        </tr></thead>
+        <tbody><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>客户端接入</h3>
+    <div class="hint" style="font-size:13px">
+      <p style="margin-bottom:6px">Claude Code:</p>
+      <code id="ccEnv"></code>
+      <p style="margin:10px 0 6px">任意 Anthropic SDK(设 base_url 与 api key):</p>
+      <code>ANTHROPIC_BASE_URL=<span id="baseHint"></span>&nbsp;&nbsp;ANTHROPIC_API_KEY=&lt;config 中的 api_keys 之一&gt;</code>
+    </div>
+  </div>
+</div>
+
+<div id="modal">
+  <div class="box">
+    <h3 style="margin-bottom:14px">添加账号 <button class="btn sm" style="float:right" onclick="closeAdd()">✕</button></h3>
+    <div class="tabs">
+      <button class="on" data-m="session_key" onclick="switchMode(this)">sessionKey 授权</button>
+      <button data-m="oauth" onclick="switchMode(this)">浏览器 OAuth</button>
+      <button data-m="manual" onclick="switchMode(this)">手动导入</button>
+    </div>
+
+    <div id="m-session_key">
+      <label>claude.ai 的 sessionKey cookie</label>
+      <input id="sk" placeholder="sk-ant-sid01-…">
+      <label>名称(可选)</label><input id="skName" placeholder="acc-1">
+      <label>代理(选池=自动对齐时区/语言,或填 URL,留空用默认)</label><input id="skProxy" list="proxyList" placeholder="如 us1 / jp1,或 http://host:port">
+      <datalist id="proxyList"></datalist>
+      <div class="hint">登录 claude.ai → F12 → Application → Cookies → 复制 sessionKey 的值。</div>
+      <div style="margin-top:16px"><button class="btn primary" style="width:100%" onclick="addSessionKey()">授权并添加</button></div>
+    </div>
+
+    <div id="m-oauth" style="display:none">
+      <button class="btn" onclick="beginOAuth()" id="beginBtn">① 生成授权链接</button>
+      <div id="oauthUrlBox" style="display:none;margin-top:12px">
+        <label>② 在浏览器打开并完成授权(登录你的 Claude 账号)</label>
+        <div class="row"><input id="oauthUrl" readonly class="mono"><button class="btn sm" onclick="window.open(document.getElementById('oauthUrl').value)">打开</button></div>
+        <label>③ 粘贴回调地址里的 code(或整段 code#state)</label>
+        <input id="oauthCode" placeholder="授权后浏览器跳转到 platform.claude.com/oauth/code/callback?code=…&state=…">
+        <label>名称(可选)</label><input id="oaName" placeholder="oauth-1">
+        <div style="margin-top:14px"><button class="btn primary" style="width:100%" onclick="completeOAuth()">完成并添加</button></div>
+      </div>
+    </div>
+
+    <div id="m-manual" style="display:none">
+      <label>refresh_token(推荐,可自动续期)</label><input id="mRT" class="mono">
+      <label>access_token(可选)</label><input id="mAT" class="mono">
+      <label>名称(可选)</label><input id="mName" placeholder="manual-1">
+      <label>代理(可选)</label><input id="mProxy" placeholder="">
+      <div style="margin-top:16px"><button class="btn primary" style="width:100%" onclick="addManual()">添加</button></div>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+let KEY = localStorage.getItem('ctapi_admin_key') || '';
+let proxyTesting = false;
+const proxyStatus = {}; // name -> html, survives auto re-render
+let oauthState = '';
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function toast(msg, type) {
+  const d = document.createElement('div');
+  d.className = 'toast ' + (type || '');
+  d.textContent = msg;
+  $('toast').appendChild(d);
+  setTimeout(() => d.remove(), 4200);
+}
+
+async function api(path, opts = {}) {
+  opts.headers = Object.assign({'X-Admin-Key': KEY, 'content-type': 'application/json'}, opts.headers || {});
+  const r = await fetch(path, opts);
+  if (r.status === 401) { logout(); throw new Error('管理密钥无效'); }
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error?.message || data.error || r.status);
+  return data;
+}
+
+function login() {
+  KEY = $('keyInput').value.trim();
+  api('/admin/accounts').then(() => {
+    localStorage.setItem('ctapi_admin_key', KEY);
+    $('gate').style.display = 'none';
+    $('app').style.display = '';
+    refreshAll();
+    setInterval(refreshAll, 10000);
+  }).catch(e => $('gateErr').textContent = e.message);
+}
+$('keyInput').addEventListener('keydown', e => e.key === 'Enter' && login());
+
+function logout() {
+  localStorage.removeItem('ctapi_admin_key');
+  location.reload();
+}
+
+async function refreshAll() {
+  try {
+    const [info, accs, usage] = await Promise.all([
+      api('/admin/info'),
+      api('/admin/accounts'),
+      api('/admin/usage').catch(() => ({usage: {}})),
+    ]);
+    renderInfo(info);
+    renderAccounts(accs.accounts || [], usage.usage || {});
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+function renderInfo(info) {
+  $('verInfo').textContent = 'v' + (info.version || '');
+  $('listenBadge').textContent = info.listen || '';
+  $('listenBadge').className = 'badge ok';
+  $('stProfile').innerHTML = esc(info.profile || '—') + '<br><small class="muted">SDK ' + esc(info.sdk_version || '') + '</small>';
+  if (info.conn_pool) $('stPool').textContent = (info.conn_pool.reuses || 0) + ' / ' + (info.conn_pool.dials || 0);
+  $('stTelemetry').innerHTML = info.telemetry
+    ? '<span style="color:var(--ok)">开启</span><br><small class="muted">' + (info.telemetry_runners || 0) + ' 个账号在跑</small>'
+    : '<span class="muted">关闭</span>';
+  const base = location.origin;
+  $('ccEnv').textContent = `export ANTHROPIC_BASE_URL=${base}`;
+  $('baseHint').textContent = base;
+  // proxy pool
+  const proxies = info.proxies || [];
+  if (proxies.length) {
+    $('proxyCard').style.display = '';
+    $('proxyList').innerHTML = proxies.map(p =>
+      `<option value="${esc(p.name)}">${esc(p.name)} · ${esc(p.timezone || '?')} · ${esc(p.language || '')}</option>`).join('');
+    if (!proxyTesting) {
+      $('proxyTable').querySelector('tbody').innerHTML = proxies.map(p => `<tr>
+        <td class="mono">${esc(p.name)}</td>
+        <td>${esc(p.timezone || '—')}</td>
+        <td class="mono">${esc(p.language || '—')}</td>
+        <td class="muted mono">${esc(p.url || '')}</td>
+        <td id="pstatus-${esc(p.name)}">${proxyStatus[p.name] || '<span class="muted">未测</span>'}</td>
+      </tr>`).join('');
+    }
+  }
+}
+
+async function testAllProxies() {
+  if (proxyTesting) return;
+  const info = await api('/admin/info').catch(() => null);
+  if (!info) return;
+  proxyTesting = true;
+  try {
+    for (const p of (info.proxies || [])) {
+      const cell = $('pstatus-' + p.name);
+      if (cell) cell.innerHTML = '<span class="muted">测试中…</span>';
+      try {
+        const r = await api('/admin/proxies/test', {method: 'POST', body: JSON.stringify({proxy: p.name})});
+        proxyStatus[p.name] = r.ok
+          ? `<span class="badge ok">${r.elapsed_ms}ms</span>`
+          : `<span class="badge err" title="${esc(r.error || '')}">失败</span>`;
+      } catch (e) {
+        proxyStatus[p.name] = `<span class="badge err">${esc(e.message)}</span>`;
+      }
+      const cell2 = $('pstatus-' + p.name);
+      if (cell2) cell2.innerHTML = proxyStatus[p.name];
+    }
+  } finally {
+    proxyTesting = false;
+  }
+}
+
+function renderAccounts(accs, usage) {
+  const now = Date.now();
+  let active = 0, cooling = 0, reqs = 0;
+  const tb = $('accTable').querySelector('tbody');
+  if (!accs.length) {
+    tb.innerHTML = '<tr><td colspan="8" class="empty">还没有账号,点右上角「添加账号」</td></tr>';
+  } else {
+    tb.innerHTML = accs.map(a => {
+      const u = usage[a.id] || [0, 0, 0];
+      reqs += u[0];
+      let status, cls;
+      if (a.status === 'error') { status = '错误: ' + (a.error || ''); cls = 'err'; }
+      else if (a.rate_limited_until && new Date(a.rate_limited_until) > new Date()) {
+        const left = Math.ceil((new Date(a.rate_limited_until) - now) / 60000);
+        status = '冷却 ' + (left >= 60 ? Math.floor(left/60) + '时' + left%60 + '分' : left + '分');
+        cls = 'cool'; cooling++;
+      } else { status = '可用'; cls = 'ok'; active++; }
+      return `<tr>
+        <td class="mono">${a.id}</td>
+        <td>${esc(a.name)}</td>
+        <td class="muted">${esc(a.email || '—')}</td>
+        <td><span class="badge ${cls}">${esc(status)}</span></td>
+        <td class="mono">${esc(a.entrypoint || 'cli')}</td>
+        <td class="mono">${u[1]||0} / ${u[2]||0} <span class="muted">(${u[0]} 次)</span></td>
+        <td class="mono">${esc(a.proxy || '默认')}<br><small class="muted">${esc(a.timezone ? a.timezone + ' · ' + a.language : '无时区绑定')}</small></td>
+        <td style="text-align:right;white-space:nowrap">
+          <button class="btn sm" onclick="editAccount(${a.id}, '${esc(a.proxy || '')}', '${esc(a.entrypoint || 'cli')}')">编辑</button>
+          <button class="btn sm" onclick="refreshToken(${a.id})">刷新token</button>
+          <button class="btn sm danger" onclick="delAccount(${a.id}, '${esc(a.name)}')">删除</button>
+        </td>
+      </tr>`;
+    }).join('');
+  }
+  $('stTotal').textContent = accs.length;
+  $('stActive').textContent = active;
+  $('stCool').textContent = cooling;
+  $('stReqs').textContent = reqs;
+}
+
+async function refreshToken(id) {
+  try { await api(`/admin/accounts/${id}/refresh`, {method: 'POST'}); toast('已刷新', 'ok'); refreshAll(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+
+async function editAccount(id, curProxy, curEntry) {
+  const proxy = prompt('代理:池名称(推荐,自动对齐时区/语言)或完整 URL,留空=跟随默认', curProxy);
+  if (proxy === null) return;
+  const entry = prompt('入口 persona:cli / sdk-cli / claude-vscode(与系统提示词变体联动)', curEntry);
+  if (entry === null) return;
+  try {
+    await api(`/admin/accounts/${id}`, {method: 'PATCH', body: JSON.stringify({
+      proxy: proxy.trim(), entrypoint: entry.trim() || undefined,
+    })});
+    toast('已更新', 'ok'); refreshAll();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function delAccount(id, name) {
+  if (!confirm(`删除账号 ${name}(#${id})?`)) return;
+  try { await api(`/admin/accounts/${id}`, {method: 'DELETE'}); toast('已删除', 'ok'); refreshAll(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+
+/* add-account modal */
+function openAdd() { $('modal').classList.add('on'); }
+function closeAdd() { $('modal').classList.remove('on'); }
+function switchMode(btn) {
+  document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('on'));
+  btn.classList.add('on');
+  ['session_key', 'oauth', 'manual'].forEach(m => $('m-' + m).style.display = m === btn.dataset.m ? '' : 'none');
+}
+
+async function addSessionKey() {
+  const sessionKey = $('sk').value.trim();
+  if (!sessionKey) return toast('请填入 sessionKey', 'err');
+  try {
+    const r = await api('/admin/accounts', {method: 'POST', body: JSON.stringify({
+      mode: 'session_key', session_key: sessionKey,
+      name: $('skName').value.trim() || undefined,
+      proxy: $('skProxy').value.trim() || undefined,
+    })});
+    toast(`账号「${r.name}」添加成功${r.email ? '(' + r.email + ')' : ''}`, 'ok');
+    $('sk').value = ''; closeAdd(); refreshAll();
+  } catch (e) { toast('添加失败: ' + e.message, 'err'); }
+}
+
+async function beginOAuth() {
+  try {
+    const r = await api('/admin/oauth/url');
+    oauthState = r.state;
+    $('oauthUrl').value = r.authorize_url;
+    $('oauthUrlBox').style.display = '';
+    $('beginBtn').textContent = '① 重新生成授权链接';
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function completeOAuth() {
+  const code = $('oauthCode').value.trim();
+  if (!code) return toast('请粘贴 code', 'err');
+  try {
+    const r = await api('/admin/oauth/complete', {method: 'POST', body: JSON.stringify({
+      code, state: oauthState, name: $('oaName').value.trim() || undefined,
+    })});
+    toast(`账号「${r.name}」添加成功`, 'ok');
+    $('oauthCode').value = ''; closeAdd(); refreshAll();
+  } catch (e) { toast('完成失败: ' + e.message, 'err'); }
+}
+
+async function addManual() {
+  const rt = $('mRT').value.trim(), at = $('mAT').value.trim();
+  if (!rt && !at) return toast('refresh_token 和 access_token 至少填一个', 'err');
+  try {
+    const r = await api('/admin/accounts', {method: 'POST', body: JSON.stringify({
+      mode: 'manual', refresh_token: rt || undefined, access_token: at || undefined,
+      name: $('mName').value.trim() || undefined,
+      proxy_url: $('mProxy').value.trim() || undefined,
+    })});
+    toast(`账号「${r.name}」添加成功`, 'ok');
+    closeAdd(); refreshAll();
+  } catch (e) { toast('添加失败: ' + e.message, 'err'); }
+}
+
+/* auto-login if key saved */
+if (KEY) {
+  api('/admin/accounts').then(() => {
+    $('gate').style.display = 'none'; $('app').style.display = '';
+    refreshAll(); setInterval(refreshAll, 10000);
+  }).catch(() => localStorage.removeItem('ctapi_admin_key'));
+}
+</script>
+</body>
+</html>

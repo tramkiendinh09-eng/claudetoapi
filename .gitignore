@@ -1,0 +1,15 @@
+claudetoapi.exe
+config.json
+data/
+*.tmp
+
+# release artifacts
+claudetoapi-linux-*.tar.gz
+claudetoapi.exe*
+claudetoapi-windows-*.exe
+config.json
+data/
+
+# binaries never in git; shipped via Releases
+dist/claudetoapi-linux-*
+dist/claudetoapi-windows-*

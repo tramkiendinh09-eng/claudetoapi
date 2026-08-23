@@ -1,0 +1,28 @@
+[Unit]
+Description=claudetoapi - Claude reverse proxy gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 按实际部署路径修改
+WorkingDirectory=/opt/claudetoapi
+ExecStart=/opt/claudetoapi/claudetoapi-linux-amd64 -c /opt/claudetoapi/config.json
+Restart=always
+RestartSec=5
+
+# 建议用非 root 运行(需 chown 数据目录)
+# User=claudetoapi
+# Group=claudetoapi
+
+# 环境变量覆盖(可选)
+# Environment=CTAPI_LISTEN=:8082
+
+# 安全加固
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/opt/claudetoapi/data
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
