@@ -436,6 +436,7 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 	// chain.Next advances the conversation chain: promptID stays stable,
 	// prevReqID links to the previous request (first request: empty).
 	promptID, prevReqID, _ := g.chain.Next(opts.SessionHash)
+	isNewConversation := prevReqID == ""
 
 	thinkingOn := hasThinking(body)
 	fastMode := false
@@ -450,6 +451,15 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 		CacheTTL1h:      cacheTTLIs1h(body),
 		FastMode:        fastMode,
 	})
+	// First turn of a conversation: emit the input_prompt telemetry marker
+	// (carries the chain's cc_prompt_id, exactly like the captured stream).
+	if g.telemetry != nil && isNewConversation {
+		sid := sessionUUID(opts.SessionHash)
+		if sid == "" {
+			sid = promptID
+		}
+		g.telemetry.NotifyConversationStart(acc, sid, opts.Model, beta, promptID, len(mimicry.FirstUserText(body)))
+	}
 
 	if !opts.IsCC {
 		attribution := mimicry.BuildAttribution(mimicry.AttributionOptions{
@@ -584,7 +594,7 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 	// Emit the same per-query telemetry event the real CLI records.
 	if g.telemetry != nil {
 		if in, out := g.lastUsageFor(acc.ID); in >= 0 {
-			g.telemetry.NotifyQuery(acc, opts.Model, opts.Stream, in, out)
+			g.telemetry.NotifyQuery(acc, opts.Model, opts.Stream, in, out, hasThinking(body))
 		}
 	}
 	return true

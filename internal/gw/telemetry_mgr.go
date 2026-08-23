@@ -32,7 +32,7 @@ func (m *TelemetryManager) Enabled() bool {
 }
 
 // EnsureStarted (re)creates the runner for an account: startup eval pull,
-// lifecycle event, token handoff. Safe to call on every request.
+// boot event sequence, token handoff. Safe to call on every request.
 func (m *TelemetryManager) EnsureStarted(acc *store.Account, accessToken string) {
 	if !m.Enabled() || acc == nil || acc.ID <= 0 {
 		return
@@ -53,6 +53,8 @@ func (m *TelemetryManager) EnsureStarted(acc *store.Account, accessToken string)
 		AccountUUID: acc.Extra.AccountUUID,
 		CLIVersion:  prof.CLIVersion,
 		UserAgent:   ua,
+		Entrypoint:  fp.Entrypoint,
+		Env:         telemetry.DefaultEnv(prof.Stainless["X-Stainless-Runtime-Version"], ""),
 	}, geo.ProxyURL, &telemetry.HTTPTransport{
 		Client: &http.Client{Transport: SharedOrderedTransport(geo.ProxyURL), Timeout: 15 * time.Second},
 	})
@@ -70,22 +72,18 @@ func (m *TelemetryManager) EnsureStarted(acc *store.Account, accessToken string)
 
 	runner.Start()
 
-	// Startup: the real CLI pulls flags once at boot (init) before any
-	// conversation, then emits a first-party "session started" event.
+	// Boot: the real CLI pulls flag config once at startup (init), then emits
+	// the startup event burst (ground truth: started/init/feature_ok/…).
+	runner.BootSequence()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	runner.Emit("tengu_attribution_consent_recorded", nil)
-	runner.Emit("tengu_start", map[string]any{
-		"entrypoint": fp.Entrypoint,
-		"version":    prof.CLIVersion,
-	})
-	runner.Flush(ctx)
+	_ = runner.Flush(ctx)
 	cancel()
 	slog.Info("telemetry_runner_started", "account_id", acc.ID)
 }
 
-// NotifyQuery emits the per-request usage event the real CLI records
-// (tengu_api_query: model, token counts, stream flag).
-func (m *TelemetryManager) NotifyQuery(acc *store.Account, model string, stream bool, inputTokens, outputTokens int64) {
+// NotifyConversationStart emits the per-turn prompt marker with the chain's
+// cc_prompt_id (ties telemetry to the billing chain, as in the capture).
+func (m *TelemetryManager) NotifyConversationStart(acc *store.Account, sessionID, model, betas, ccPromptID string, promptLen int) {
 	if !m.Enabled() {
 		return
 	}
@@ -95,14 +93,22 @@ func (m *TelemetryManager) NotifyQuery(acc *store.Account, model string, stream 
 	if runner == nil {
 		return
 	}
-	runner.Emit("tengu_api_query", map[string]any{
-		"model":           model,
-		"stream":          stream,
-		"input_tokens":    inputTokens,
-		"output_tokens":   outputTokens,
-		"provider":        "firstParty",
-		"permission_mode": "default",
-	})
+	runner.NoteSession(sessionID, model, betas)
+	runner.QueryPrompt(ccPromptID, 1, promptLen)
+}
+
+// NotifyQuery emits the per-request usage event the real CLI records.
+func (m *TelemetryManager) NotifyQuery(acc *store.Account, model string, stream bool, inputTokens, outputTokens int64, thinking bool) {
+	if !m.Enabled() {
+		return
+	}
+	m.mu.Lock()
+	runner := m.runners[acc.ID]
+	m.mu.Unlock()
+	if runner == nil {
+		return
+	}
+	runner.QueryDone(model, stream, inputTokens, outputTokens, thinking)
 }
 
 // StopAll shuts down every runner (flushes pending events).
