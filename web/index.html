@@ -53,6 +53,8 @@ tr:last-child td{border-bottom:none}
 #modal{position:fixed;inset:0;background:rgba(5,7,12,.7);display:none;align-items:flex-start;justify-content:center;z-index:40;padding:40px 16px;overflow:auto}
 #modal.on{display:flex}
 #modal .box{width:560px;max-width:100%;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px}
+#editModal{position:fixed;inset:0;background:rgba(5,7,12,.7);display:none;align-items:center;justify-content:center;z-index:45}
+#editModal.on{display:flex}
 .tabs{display:flex;gap:6px;margin-bottom:16px;border-bottom:1px solid var(--line)}
 .tabs button{background:none;border:none;color:var(--muted);padding:8px 14px;cursor:pointer;font-size:13px;border-bottom:2px solid transparent}
 .tabs button.on{color:var(--acc);border-bottom-color:var(--acc)}
@@ -94,7 +96,9 @@ code{background:var(--panel2);padding:2px 7px;border-radius:5px;font-family:Cons
       <div class="stat"><div class="muted">账号总数</div><div class="v" id="stTotal">0</div></div>
       <div class="stat"><div class="muted">可用</div><div class="v" id="stActive" style="color:var(--ok)">0</div></div>
       <div class="stat"><div class="muted">冷却/限流</div><div class="v" id="stCool" style="color:var(--cool)">0</div></div>
-      <div class="stat"><div class="muted">累计请求</div><div class="v" id="stReqs">0</div></div>
+      <div class="stat"><div class="muted">今日请求</div><div class="v" id="stReqs">0<small> / 累计 <span id="stReqsTotal">0</span></small></div></div>
+      <div class="stat"><div class="muted">今日 tokens(入/出)</div><div class="v" style="font-size:16px" id="stTodayTok">—</div></div>
+      <div class="stat"><div class="muted">今日缓存 读/写</div><div class="v" style="font-size:16px" id="stTodayCache">—</div></div>
       <div class="stat"><div class="muted">伪装版本</div><div class="v" id="stProfile" style="font-size:15px">—</div></div>
       <div class="stat"><div class="muted">连接复用(命中/新建)</div><div class="v" id="stPool" style="font-size:15px">—</div></div>
       <div class="stat"><div class="muted">遥测旁路</div><div class="v" id="stTelemetry" style="font-size:15px">—</div></div>
@@ -135,6 +139,12 @@ code{background:var(--panel2);padding:2px 7px;border-radius:5px;font-family:Cons
         <select id="logFilter" style="width:auto" onchange="renderLogs()">
           <option value="0">全部账号</option>
         </select>
+        <select id="logStatus" style="width:auto" onchange="renderLogs()">
+          <option value="">全部状态</option>
+          <option value="ok">成功(2xx)</option>
+          <option value="err">失败(≥400)</option>
+        </select>
+        <input id="logModel" placeholder="模型筛选" style="width:130px" oninput="renderLogs()">
         <button class="btn sm" onclick="loadLogs()">刷新</button>
       </span>
     </h3>
@@ -157,6 +167,21 @@ code{background:var(--panel2);padding:2px 7px;border-radius:5px;font-family:Cons
       <code id="ccEnv"></code>
       <p style="margin:10px 0 6px">任意 Anthropic SDK(设 base_url 与 api key):</p>
       <code>ANTHROPIC_BASE_URL=<span id="baseHint"></span>&nbsp;&nbsp;ANTHROPIC_API_KEY=&lt;config 中的 api_keys 之一&gt;</code>
+    </div>
+  </div>
+</div>
+
+<div id="editModal">
+  <div class="box" style="width:440px">
+    <h3 style="margin-bottom:14px">编辑账号 <span id="editNameTitle" class="muted"></span> <button class="btn sm" style="float:right" onclick="closeEdit()">✕</button></h3>
+    <label>名称</label><input id="eName">
+    <label>代理(池名称=自动对齐时区/语言,或完整 URL,留空=跟随默认)</label><input id="eProxy" list="proxyList">
+    <label>入口 persona(cli / sdk-cli / claude-vscode)</label><input id="eEntry">
+    <label>并发上限(每账号同时转发的请求数,默认 2)</label><input id="eConc" type="number" min="1" max="16">
+    <div id="editErr" class="hint" style="color:var(--err);margin-top:8px"></div>
+    <div style="margin-top:16px;display:flex;gap:8px">
+      <button class="btn primary" style="flex:1" onclick="saveEdit()">保存</button>
+      <button class="btn" onclick="closeEdit()">取消</button>
     </div>
   </div>
 </div>
@@ -328,11 +353,23 @@ function fmtTok(n) {
 
 function renderAccounts(accs, usage) {
   const now = Date.now();
-  let active = 0, cooling = 0, reqs = 0;
+  let active = 0, cooling = 0, reqs = 0, reqsToday = 0;
+  let tin = 0, tout = 0, tcw = 0, tcr = 0;
   accNameMap = {};
   const filterSel = $('logFilter');
   const curFilter = filterSel.value;
-  accs.forEach(a => { accNameMap[a.id] = a.name; });
+  accs.forEach(a => {
+    accNameMap[a.id] = a.name;
+    const agg = (usage[a.id] || {}).total || {};
+    const day = (usage[a.id] || {}).today || {};
+    reqs += (agg.reqs || 0);
+    reqsToday += (day.reqs || 0);
+    tin += day.input || 0; tout += day.output || 0;
+    tcw += day.cache_write || 0; tcr += day.cache_read || 0;
+  });
+  $('stReqsTotal').textContent = reqs;
+  $('stTodayTok').innerHTML = fmtTok(tin) + ' / ' + fmtTok(tout);
+  $('stTodayCache').innerHTML = '<span style="color:var(--cool)">' + fmtTok(tcr) + '</span> / <span style="color:var(--warn)">' + fmtTok(tcw) + '</span>';
   // rebuild the account filter options preserving the current selection
   filterSel.innerHTML = '<option value="0">全部账号</option>' +
     accs.map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
@@ -364,7 +401,7 @@ function renderAccounts(accs, usage) {
         </td>
         <td class="mono">${esc(a.proxy || '默认')}<br><small class="muted">${esc(a.timezone ? a.timezone + ' · ' + a.language : '无时区绑定')}</small></td>
         <td style="text-align:right;white-space:nowrap">
-          <button class="btn sm" onclick="editAccount(${a.id}, '${esc(a.proxy || '')}', '${esc(a.entrypoint || 'cli')}')">编辑</button>
+          <button class="btn sm" onclick='openEdit(${JSON.stringify({id:a.id, name:a.name, proxy:(a.proxy==="默认"?"":a.proxy), entrypoint:a.entrypoint, concurrency:a.concurrency})})'>编辑</button>
           <button class="btn sm" onclick="refreshToken(${a.id})">刷新token</button>
           <button class="btn sm danger" onclick="delAccount(${a.id}, '${esc(a.name)}')">删除</button>
         </td>
@@ -374,7 +411,7 @@ function renderAccounts(accs, usage) {
   $('stTotal').textContent = accs.length;
   $('stActive').textContent = active;
   $('stCool').textContent = cooling;
-  $('stReqs').textContent = reqs;
+  $('stReqs').firstChild.nodeValue = String(reqsToday);
 }
 
 async function loadLogs() {
@@ -388,7 +425,15 @@ async function loadLogs() {
 function renderLogs() {
   const tb = $('logTable').querySelector('tbody');
   const f = $('logFilter').value;
-  const rows = usageLogs.filter(l => f === '0' || String(l.account_id) === f);
+  const st = $('logStatus').value;
+  const model = $('logModel').value.trim().toLowerCase();
+  const rows = usageLogs.filter(l => {
+    if (f !== '0' && String(l.account_id) !== f) return false;
+    if (st === 'ok' && !(l.status >= 200 && l.status < 300)) return false;
+    if (st === 'err' && l.status < 400) return false;
+    if (model && !(l.model || '').toLowerCase().includes(model)) return false;
+    return true;
+  });
   if (!rows.length) {
     tb.innerHTML = '<tr><td colspan="9" class="empty">暂无请求记录</td></tr>';
     return;
@@ -414,17 +459,31 @@ async function refreshToken(id) {
   catch (e) { toast(e.message, 'err'); }
 }
 
-async function editAccount(id, curProxy, curEntry) {
-  const proxy = prompt('代理:池名称(推荐,自动对齐时区/语言)或完整 URL,留空=跟随默认', curProxy);
-  if (proxy === null) return;
-  const entry = prompt('入口 persona:cli / sdk-cli / claude-vscode(与系统提示词变体联动)', curEntry);
-  if (entry === null) return;
+/* edit-account modal */
+let editId = 0;
+function openEdit(a) {
+  editId = a.id;
+  $('editNameTitle').textContent = '#' + a.id;
+  $('eName').value = a.name || '';
+  $('eProxy').value = (a.proxy && a.proxy !== '默认') ? a.proxy : '';
+  $('eEntry').value = a.entrypoint || 'cli';
+  $('eConc').value = a.concurrency || 2;
+  $('editErr').textContent = '';
+  $('editModal').classList.add('on');
+}
+function closeEdit() { $('editModal').classList.remove('on'); }
+async function saveEdit() {
+  const body = {
+    name: $('eName').value.trim() || undefined,
+    proxy: $('eProxy').value.trim(),
+    entrypoint: $('eEntry').value.trim() || undefined,
+  };
+  const c = parseInt($('eConc').value, 10);
+  if (c >= 1 && c <= 16) body.concurrency = c;
   try {
-    await api(`/admin/accounts/${id}`, {method: 'PATCH', body: JSON.stringify({
-      proxy: proxy.trim(), entrypoint: entry.trim() || undefined,
-    })});
-    toast('已更新', 'ok'); refreshAll();
-  } catch (e) { toast(e.message, 'err'); }
+    await api(`/admin/accounts/${editId}`, {method: 'PATCH', body: JSON.stringify(body)});
+    toast('已更新', 'ok'); closeEdit(); refreshAll();
+  } catch (e) { $('editErr').textContent = e.message; }
 }
 async function delAccount(id, name) {
   if (!confirm(`删除账号 ${name}(#${id})?`)) return;

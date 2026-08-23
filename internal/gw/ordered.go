@@ -138,8 +138,18 @@ func (t *OrderedTransport) Stats() (dials, reuses, dropped uint64) {
 	return t.stats.dials, t.stats.reuses, t.stats.dropped
 }
 
-func (t *OrderedTransport) dial(ctx context.Context, addr string) (*pooledConn, error) {
-	conn, err := tlsfp.Dial(ctx, "tcp", addr, t.proxyURL)
+func (t *OrderedTransport) dial(ctx context.Context, scheme, addr string) (*pooledConn, error) {
+	var (
+		conn net.Conn
+		err  error
+	)
+	if scheme == "http" {
+		// Plain HTTP upstream (test rigs, self-hosted relays): no TLS layer.
+		var d net.Dialer
+		conn, err = d.DialContext(ctx, "tcp", addr)
+	} else {
+		conn, err = tlsfp.Dial(ctx, "tcp", addr, t.proxyURL)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -151,8 +161,8 @@ func (t *OrderedTransport) dial(ctx context.Context, addr string) (*pooledConn, 
 
 // RoundTrip implements http.RoundTripper with byte-controlled output.
 func (t *OrderedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.URL.Scheme != "https" {
-		return nil, fmt.Errorf("ordered transport only supports https")
+	if req.URL.Scheme != "https" && req.URL.Scheme != "http" {
+		return nil, fmt.Errorf("ordered transport only supports http/https")
 	}
 	var body []byte
 	if req.Body != nil {
@@ -165,7 +175,11 @@ func (t *OrderedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 	addr := req.URL.Host
 	if !strings.Contains(addr, ":") {
-		addr += ":443"
+		if req.URL.Scheme == "https" {
+			addr += ":443"
+		} else {
+			addr += ":80"
+		}
 	}
 	key := addr
 
@@ -173,7 +187,7 @@ func (t *OrderedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	reused := pc != nil
 	if pc == nil {
 		var err error
-		pc, err = t.dial(req.Context(), addr)
+		pc, err = t.dial(req.Context(), req.URL.Scheme, addr)
 		if err != nil {
 			return nil, err
 		}
@@ -184,7 +198,7 @@ func (t *OrderedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		_ = pc.conn.Close()
 		if reused {
 			// Stale pooled connection: retry once on a fresh one.
-			pc, err = t.dial(req.Context(), addr)
+			pc, err = t.dial(req.Context(), req.URL.Scheme, addr)
 			if err != nil {
 				return nil, err
 			}

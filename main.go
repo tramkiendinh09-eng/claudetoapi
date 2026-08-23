@@ -5,13 +5,17 @@
 package main
 
 import (
+	"context"
 	"embed"
+	"errors"
 	"flag"
 	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 	// Embed the IANA timezone database: Windows hosts have no system tzdata,
 	// and per-proxy timezone binding needs it.
@@ -27,7 +31,7 @@ import (
 var webFS embed.FS
 
 // version is reported by /admin/info and the console.
-const version = "0.3.0"
+const version = "0.4.0"
 
 func main() {
 	cfgPath := flag.String("c", "config.json", "path to config.json")
@@ -55,9 +59,9 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	// Gateway endpoints (API-key auth).
+	// Gateway endpoints (API-key auth, CORS-enabled for browser SDKs).
 	mux.HandleFunc("POST /v1/messages", apiKeyAuth(cfg)(gateway.HandleMessages))
-	mux.HandleFunc("POST /v1/messages/count_tokens", apiKeyAuth(cfg)(gateway.HandleMessages))
+	mux.HandleFunc("POST /v1/messages/count_tokens", apiKeyAuth(cfg)(gateway.HandleCountTokens))
 	mux.HandleFunc("GET /v1/models", apiKeyAuth(cfg)(gateway.HandleModels))
 
 	admin.Mount(mux)
@@ -84,20 +88,55 @@ func main() {
 		}
 	}()
 
-	// Graceful shutdown: flush telemetry batches and the usage ledger.
-	defer gateway.CloseUsage()
-	defer gateway.Telemetry().StopAll()
-
-	slog.Info("claudetoapi listening", "addr", cfg.Listen, "accounts", len(st.Snapshot()))
+	slog.Info("claudetoapi listening", "addr", cfg.Listen, "accounts", len(st.Snapshot()), "version", version)
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           mux,
+		Handler:           withCORS(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	if err := srv.ListenAndServe(); err != nil {
-		slog.Error("server", "error", err)
-		os.Exit(1)
+
+	// Serve until SIGINT/SIGTERM, then drain: stop accepting, let in-flight
+	// streams finish (15s cap), flush the usage ledger and telemetry batches.
+	done := make(chan struct{})
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("server", "error", err)
+			os.Exit(1)
+		}
+		close(done)
+	}()
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	select {
+	case <-sig:
+		slog.Info("shutting down")
+	case <-done:
 	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(ctx)
+	gateway.Telemetry().StopAll()
+	gateway.CloseUsage()
+	slog.Info("stopped")
+}
+
+// withCORS allows browser-hosted SDKs to call the gateway directly.
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if origin := r.Header.Get("Origin"); origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "*")
+			w.Header().Set("Access-Control-Max-Age", "86400")
+		}
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // apiKeyAuth wraps a handler with API-key verification.

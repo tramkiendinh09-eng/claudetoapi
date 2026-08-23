@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,7 +22,7 @@ import (
 	"claudetoapi/internal/store"
 )
 
-const upstreamMessagesURL = "https://api.anthropic.com/v1/messages?beta=true"
+const defaultUpstreamBase = "https://api.anthropic.com"
 
 // Gateway is the forwarding core.
 type Gateway struct {
@@ -29,6 +30,9 @@ type Gateway struct {
 	st        *store.Store
 	chain     *Chain
 	telemetry *TelemetryManager
+	// upstreamBase is overridable so integration tests can point the whole
+	// forwarding pipeline at a fake upstream.
+	upstreamBase string
 
 	// tokenMu serializes refresh per account.
 	tokenMu sync.Mutex
@@ -42,10 +46,11 @@ type Gateway struct {
 
 func New(cfg *config.Config, st *store.Store) *Gateway {
 	g := &Gateway{
-		cfg:       cfg,
-		st:        st,
-		chain:     NewChain(),
-		telemetry: nil,
+		cfg:          cfg,
+		st:           st,
+		chain:        NewChain(),
+		telemetry:    nil,
+		upstreamBase: defaultUpstreamBase,
 	}
 	g.ledger = newUsageLedger(filepath.Join(cfg.AccountsDir, "usage_history.json"))
 	g.ledger.startSaver()
@@ -360,6 +365,17 @@ func (g *Gateway) RefreshExpiring() {
 
 // HandleMessages is the /v1/messages entry point.
 func (g *Gateway) HandleMessages(w http.ResponseWriter, r *http.Request) {
+	g.handleMessages(w, r, false)
+}
+
+// HandleCountTokens is the /v1/messages/count_tokens entry point: the same
+// selection/mimicry pipeline but forwarded to the count_tokens endpoint so a
+// token-count request never consumes a real generation.
+func (g *Gateway) HandleCountTokens(w http.ResponseWriter, r *http.Request) {
+	g.handleMessages(w, r, true)
+}
+
+func (g *Gateway) handleMessages(w http.ResponseWriter, r *http.Request, countTokens bool) {
 	body, _, err := mimicry.ReadJSONBody(r, int64(g.cfg.MaxBodyMB)<<20)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_request_error", "request body is not valid JSON: "+err.Error())
@@ -383,18 +399,48 @@ func (g *Gateway) HandleMessages(w http.ResponseWriter, r *http.Request) {
 	for i := 0; i < attempts; i++ {
 		acc := g.pick(sessionHash, exclude)
 		if acc == nil {
-			writeErr(w, http.StatusServiceUnavailable, "overloaded_error", "no available upstream accounts")
+			g.writeOverloaded(w)
 			return
 		}
 		done := g.forwardOnce(w, r, acc, body, forwardOpts{
 			IsCC: isCC, Stream: stream, Model: model, SessionHash: sessionHash, ClientHeaders: r.Header,
+			CountTokens: countTokens,
 		})
 		if done {
 			return
 		}
 		exclude[acc.ID] = true
 	}
-	writeErr(w, http.StatusServiceUnavailable, "overloaded_error", "all upstream attempts failed")
+	g.writeOverloaded(w)
+}
+
+// writeOverloaded reports upstream exhaustion with a Retry-After derived from
+// the accounts' rate-limit windows so well-behaved clients back off exactly
+// as long as needed.
+func (g *Gateway) writeOverloaded(w http.ResponseWriter) {
+	if secs := g.retryAfterSeconds(); secs > 0 {
+		w.Header().Set("retry-after", strconv.FormatInt(secs, 10))
+	}
+	writeErr(w, http.StatusServiceUnavailable, "overloaded_error", "no available upstream accounts")
+}
+
+// retryAfterSeconds returns seconds until the earliest active account leaves
+// its rate-limit window (0 when no window is known).
+func (g *Gateway) retryAfterSeconds() int64 {
+	var best int64
+	for _, acc := range g.st.Snapshot() {
+		if acc.Status != "active" || acc.RateLimitedUntil == nil {
+			continue
+		}
+		secs := int64(time.Until(*acc.RateLimitedUntil).Seconds()) + 1
+		if secs > 0 && (best == 0 || secs < best) {
+			best = secs
+		}
+	}
+	if best > 3600 {
+		best = 3600
+	}
+	return best
 }
 
 type forwardOpts struct {
@@ -514,7 +560,13 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 		return true
 	}
 
-	upstream, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamMessagesURL, bytes.NewReader(payload))
+	// count_tokens goes to its own endpoint (and never consumes a
+	// generation); everything else to /v1/messages?beta=true.
+	target := strings.TrimRight(g.upstreamBase, "/") + "/v1/messages?beta=true"
+	if opts.CountTokens {
+		target = strings.TrimRight(g.upstreamBase, "/") + "/v1/messages/count_tokens"
+	}
+	upstream, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(payload))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "api_error", err.Error())
 		return true
@@ -602,10 +654,16 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(data)
-		g.recordAttempt(acc, opts, resp.StatusCode, start, parseFinalUsage(data))
+		if opts.CountTokens {
+			// count_tokens reports {"input_tokens":N} at the top level.
+			g.recordAttempt(acc, opts, resp.StatusCode, start, parseCountTokens(data))
+		} else {
+			g.recordAttempt(acc, opts, resp.StatusCode, start, parseFinalUsage(data))
+		}
 	}
-	// Emit the same per-query telemetry event the real CLI records.
-	if g.telemetry != nil {
+	// Emit the same per-query telemetry event the real CLI records (a token
+	// count is not a model query, so it stays out of telemetry).
+	if g.telemetry != nil && !opts.CountTokens {
 		if in, out := g.ledger.lastUsage(); in >= 0 {
 			g.telemetry.NotifyQuery(acc, opts.Model, opts.Stream, in, out, hasThinking(body))
 		}
@@ -721,6 +779,18 @@ func parseFinalUsage(data []byte) usageAcc {
 		u.cacheRead = *v.Usage.CacheReadInputTokens
 	}
 	return u
+}
+
+// parseCountTokens reads the top-level input_tokens of a count_tokens
+// response into the ledger accumulator.
+func parseCountTokens(data []byte) usageAcc {
+	var v struct {
+		InputTokens *int64 `json:"input_tokens"`
+	}
+	if json.Unmarshal(data, &v) != nil || v.InputTokens == nil {
+		return usageAcc{}
+	}
+	return usageAcc{input: *v.InputTokens}
 }
 
 // ---- small helpers ----

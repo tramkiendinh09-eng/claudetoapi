@@ -149,11 +149,24 @@ claude   # Claude Code 直接可用;其他 Anthropic SDK 客户端同理
 - **粘性会话**:同一对话固定同一账号(sessionHash = user_id.session_id,退化到内容哈希);同账号同 `cc_prompt_id`,轮次间以 `cc_prev_req` 链接——与真实 CLI 的会话链一致;
 - **故障转移**:401 → 失效 token + 10 分钟冷却等刷新;403 → 永久禁用;429 → 解析 `anthropic-ratelimit-unified-{5h,7d,7d_oi}-*` 精确停到窗口重置,无重置头的 429 只做 5 秒兜底(那是第三方判定信号,不是真限流);529/5xx → 换号;
 - **账号身份**:每账号持久化 ClientID(64hex)+ UA + entrypoint persona,版本只升不降,畸形 UA(如 `999.0.0-local`)拒收——sub2api 的教训:被毒化的 UA 会招来无重置头的持续 429;
-- **代理**:每账号可绑独立代理(HTTP/SOCKS5),TLS 指纹在代理隧道内保持。
+- **代理**:每账号可绑独立代理(HTTP/SOCKS5),TLS 指纹在代理隧道内保持;添加账号(sessionKey / OAuth / 手动)时即可选择代理池,OAuth 换码也从所选代理出口发出;
+- **count_tokens**:`/v1/messages/count_tokens` 转发到上游同名端点(带 token-counting beta),不会误触发一次真实生成;
+- **优雅停机**:SIGINT/SIGTERM 时停止接入、等在途流结束(15s 上限),冲刷用量台账与遥测批次;
+- **CORS**:网关端点开放跨域(浏览器端 SDK 可直连),预检 86400s 缓存;
+- **503 Retry-After**:账号全部限流时,按最近的限流窗口重置时间返回 `Retry-After`。
+
+## 用量台账
+
+每账号两级用量记录,持久化在 `data/usage_history.json`(重启不丢):
+
+- **聚合**:今日/累计 × 请求数、错误数、输入、输出、缓存写(cache_creation)、缓存读(cache_read);
+- **明细**:最近 2000 条请求记录(时间、模型、状态码、耗时、SSE 标记、token 四项明细),失败尝试(401/403/429/5xx)也记录;
+- **接口**:`GET /admin/usage`(聚合)、`GET /admin/usage/logs?account_id=&limit=`(明细);
+- **控制台**:账号表两行用量列 + 独立请求日志卡片(按账号/状态/模型筛选)。
 
 ## 局限(与 sub2api 相比)
 
-单节点、无计费/用户体系、无 Web 管理台;存储为 JSON 文件(适合 ≤ 数十账号);`anthropic-dispatch-id`、`x-cc-fallback-*` 等灰度头默认关闭(配置可开);遥测旁路(statsig)未实现——见《防封增强方案》P2 项。
+单节点、无计费/用户体系;存储为 JSON 文件(适合 ≤ 数十账号);`anthropic-dispatch-id`、`x-cc-fallback-*` 等灰度头默认关闭(配置可开)。
 
 ## 合规提示
 
