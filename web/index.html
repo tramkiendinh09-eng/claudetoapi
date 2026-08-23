@@ -188,6 +188,7 @@ code{background:var(--panel2);padding:2px 7px;border-radius:5px;font-family:Cons
         <label>③ 粘贴回调地址里的 code(或整段 code#state)</label>
         <input id="oauthCode" placeholder="授权后浏览器跳转到 platform.claude.com/oauth/code/callback?code=…&state=…">
         <label>名称(可选)</label><input id="oaName" placeholder="oauth-1">
+        <label>代理(选池=自动对齐时区/语言,或填 URL,留空用默认)</label><input id="oaProxy" list="proxyList" placeholder="如 us1 / jp1,或 http://host:port">
         <div style="margin-top:14px"><button class="btn primary" style="width:100%" onclick="completeOAuth()">完成并添加</button></div>
       </div>
     </div>
@@ -196,7 +197,7 @@ code{background:var(--panel2);padding:2px 7px;border-radius:5px;font-family:Cons
       <label>refresh_token(推荐,可自动续期)</label><input id="mRT" class="mono">
       <label>access_token(可选)</label><input id="mAT" class="mono">
       <label>名称(可选)</label><input id="mName" placeholder="manual-1">
-      <label>代理(可选)</label><input id="mProxy" placeholder="">
+      <label>代理(选池=自动对齐时区/语言,或填 URL,留空用默认)</label><input id="mProxy" list="proxyList" placeholder="如 us1 / jp1,或 http://host:port">
       <div style="margin-top:16px"><button class="btn primary" style="width:100%" onclick="addManual()">添加</button></div>
     </div>
   </div>
@@ -469,8 +470,9 @@ async function completeOAuth() {
   try {
     const r = await api('/admin/oauth/complete', {method: 'POST', body: JSON.stringify({
       code, state: oauthState, name: $('oaName').value.trim() || undefined,
+      proxy: $('oaProxy').value.trim() || undefined,
     })});
-    toast(`账号「${r.name}」添加成功`, 'ok');
+    toast(`账号「${r.name}」添加成功${r.proxy ? '(出口: ' + r.proxy + ')' : ''}`, 'ok');
     $('oauthCode').value = ''; closeAdd(); refreshAll();
   } catch (e) { toast('完成失败: ' + e.message, 'err'); }
 }
@@ -482,7 +484,7 @@ async function addManual() {
     const r = await api('/admin/accounts', {method: 'POST', body: JSON.stringify({
       mode: 'manual', refresh_token: rt || undefined, access_token: at || undefined,
       name: $('mName').value.trim() || undefined,
-      proxy_url: $('mProxy').value.trim() || undefined,
+      proxy: $('mProxy').value.trim() || undefined,
     })});
     toast(`账号「${r.name}」添加成功`, 'ok');
     closeAdd(); refreshAll();

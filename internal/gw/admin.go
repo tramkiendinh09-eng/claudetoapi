@@ -405,26 +405,48 @@ func (a *Admin) oauthComplete(w http.ResponseWriter, r *http.Request) {
 		Code     string `json:"code"`
 		State    string `json:"state"`
 		Name     string `json:"name"`
-		ProxyURL string `json:"proxy_url"`
+		Proxy    string `json:"proxy"`    // named proxy pool entry (preferred)
+		ProxyURL string `json:"proxy_url"` // raw URL fallback
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	oc := oauth.New(orDefault(req.ProxyURL, a.cfg.DefaultProxyURL))
+	// Validate the named proxy reference.
+	if req.Proxy != "" && !strings.Contains(req.Proxy, "://") {
+		found := false
+		for _, p := range a.cfg.Proxies {
+			if p.Name == req.Proxy {
+				found = true
+				break
+			}
+		}
+		if !found {
+			writeErr(w, http.StatusBadRequest, "invalid_request_error", "unknown proxy pool name: "+req.Proxy)
+			return
+		}
+	}
+	// The code exchange carries the account's credentials: it must egress
+	// through the same proxy the account will use afterwards.
+	acc := &store.Account{Name: orDefault(req.Name, fmt.Sprintf("oauth-%d", time.Now().Unix()))}
+	switch {
+	case req.Proxy != "":
+		acc.Proxy = req.Proxy
+	case req.ProxyURL != "":
+		acc.ProxyURL = req.ProxyURL
+	default:
+		acc.ProxyURL = a.cfg.DefaultProxyURL
+	}
+	oc := oauth.New(a.gw.geoFor(acc).ProxyURL)
 	tr, err := oc.CompleteBrowserFlow(r.Context(), req.Code, req.State)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "api_error", "code exchange failed: "+err.Error())
 		return
 	}
-	acc := &store.Account{
-		Name:     orDefault(req.Name, fmt.Sprintf("oauth-%d", time.Now().Unix())),
-		ProxyURL: req.ProxyURL,
-		Credentials: store.Credentials{
-			AccessToken:  tr.AccessToken,
-			RefreshToken: tr.RefreshToken,
-			ExpiresAt:    time.Now().Add(time.Duration(tr.ExpiresIn) * time.Second).UTC().Format(time.RFC3339),
-		},
+	acc.Credentials = store.Credentials{
+		AccessToken:  tr.AccessToken,
+		RefreshToken: tr.RefreshToken,
+		ExpiresAt:    time.Now().Add(time.Duration(tr.ExpiresIn) * time.Second).UTC().Format(time.RFC3339),
 	}
 	if tr.Account != nil {
 		acc.Extra.AccountUUID = tr.Account.UUID
@@ -434,7 +456,11 @@ func (a *Admin) oauthComplete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "api_error", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"id": acc.ID, "name": acc.Name, "email": acc.Extra.Email})
+	// Provision the persistent fingerprint identity (cli persona).
+	_ = a.st.Update(acc.ID, func(x *store.Account) {
+		a.gw.provisionFingerprint(x, "")
+	})
+	writeJSON(w, http.StatusCreated, map[string]any{"id": acc.ID, "name": acc.Name, "email": acc.Extra.Email, "proxy": acc.Proxy})
 }
 
 // usage returns per-account today/total aggregates:
