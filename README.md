@@ -157,7 +157,7 @@ claude   # Claude Code 直接可用;其他 Anthropic SDK 客户端同理
 
 ## 输出风格(等效 `claude /config outputStyle=…`)
 
-控制台概览卡可直接切换输出风格(即时生效,原子写回 config.json):
+两级生效:**账号级优先**(编辑账号弹窗 / `PATCH /admin/accounts/{id} {"output_style":…}`,清空即回落全局),**全局默认**在概览卡切换(即时生效,原子写回 config.json)。账号各自独立设置也更贴近真实用户分布——每个人有自己的风格偏好:
 
 - **默认** — 不注入;
 - **Concise** — Opus 冗长的临时补丁同款:注入真实 CLI 的内置 Concise 风格(身份句替换 + `# Output Style: Concise` 段,原文照搬 claude.exe 2.1.241 payload);

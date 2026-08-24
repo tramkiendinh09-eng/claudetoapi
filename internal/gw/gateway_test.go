@@ -408,3 +408,18 @@ func TestRefreshEndpointParsesAccountID(t *testing.T) {
 		t.Fatalf("pathID on plain id path: %d %v", id, err)
 	}
 }
+
+func TestAccountStyleOverridesGlobal(t *testing.T) {
+	if got := accountStyle(&store.Account{OutputStyle: "concise"}, "proactive"); got != "concise" {
+		t.Fatalf("account style must win, got %q", got)
+	}
+	if got := accountStyle(&store.Account{}, "proactive"); got != "proactive" {
+		t.Fatalf("unset account must inherit global, got %q", got)
+	}
+	if got := accountStyle(nil, "concise"); got != "concise" {
+		t.Fatalf("nil account must inherit global, got %q", got)
+	}
+	if got := accountStyle(&store.Account{}, ""); got != "" {
+		t.Fatalf("no styles anywhere must stay empty, got %q", got)
+	}
+}

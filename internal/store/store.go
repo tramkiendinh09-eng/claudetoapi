@@ -67,6 +67,11 @@ type Account struct {
 	// Last observed unified rate-limit windows (from success headers).
 	RateWindow5h *RateWindow `json:"rate_window_5h,omitempty"`
 	RateWindow7d *RateWindow `json:"rate_window_7d,omitempty"`
+
+	// OutputStyle overrides the global default for this account ("",
+	// "concise", "proactive"). A per-account style also mirrors how real
+	// users each pick their own setting.
+	OutputStyle string `json:"output_style,omitempty"`
 }
 
 // Active reports whether the account can be scheduled now.

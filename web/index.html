@@ -184,6 +184,12 @@ code{background:var(--panel2);padding:2px 7px;border-radius:5px;font-family:Cons
     <label>名称</label><input id="eName">
     <label>代理(池名称=自动对齐时区/语言,或完整 URL,留空=跟随默认)</label><input id="eProxy" list="proxyList">
     <label>入口 persona(cli / sdk-cli / claude-vscode)</label><input id="eEntry">
+    <label>输出风格(该账号独立生效;跟随全局默认=继承概览卡的全局设置)</label>
+    <select id="eStyle">
+      <option value="">跟随全局默认</option>
+      <option value="concise">Concise(简洁)</option>
+      <option value="proactive">Proactive(主动执行)</option>
+    </select>
     <label>并发上限(每账号同时转发的请求数,默认 2)</label><input id="eConc" type="number" min="1" max="16">
     <div id="editErr" class="hint" style="color:var(--err);margin-top:8px"></div>
     <div style="margin-top:16px;display:flex;gap:8px">
@@ -418,7 +424,7 @@ function renderAccounts(accs, usage) {
         <td>${esc(a.name)}</td>
         <td class="muted">${esc(a.email || '—')}</td>
         <td><span class="badge ${cls}" title="${esc(status)}">${esc(status.length > 30 ? status.slice(0, 30) + '…' : status)}</span></td>
-        <td class="mono">${esc(a.entrypoint || 'cli')}</td>
+        <td class="mono">${esc(a.entrypoint || 'cli')}${a.output_style ? '<br><small class="muted" style="color:var(--acc)">风格: ' + esc(a.output_style) + '</small>' : ''}</td>
         <td class="mono">
           <div>今日 ${fmtTok(d.input)} + ${fmtTok(d.cache_write)}W + ${fmtTok(d.cache_read)}R / ${fmtTok(d.output)} <span class="muted">(${d.reqs||0} 次${d.errors ? ', ' + d.errors + ' 错' : ''})</span></div>
           <div class="muted">累计 ${fmtTok(t.input)} + ${fmtTok(t.cache_write)}W + ${fmtTok(t.cache_read)}R / ${fmtTok(t.output)} <span>(${t.reqs||0} 次${t.errors ? ', ' + t.errors + ' 错' : ''})</span></div>
@@ -427,7 +433,7 @@ function renderAccounts(accs, usage) {
         <td class="mono">${esc(a.proxy || '默认')}<br><small class="muted">${esc(a.timezone ? a.timezone + ' · ' + a.language : '无时区绑定')}</small></td>
         <td style="text-align:right;white-space:nowrap">
           ${actions}
-          <button class="btn sm" onclick='openEdit(${JSON.stringify({id:a.id, name:a.name, proxy:(a.proxy==="默认"?"":a.proxy), entrypoint:a.entrypoint, concurrency:a.concurrency})})'>编辑</button>
+          <button class="btn sm" onclick='openEdit(${JSON.stringify({id:a.id, name:a.name, proxy:(a.proxy==="默认"?"":a.proxy), entrypoint:a.entrypoint, concurrency:a.concurrency, output_style:a.output_style||''})})'>编辑</button>
           <button class="btn sm" onclick="refreshToken(${a.id})">刷新token</button>
           <button class="btn sm danger" onclick="delAccount(${a.id}, '${esc(a.name)}')">删除</button>
         </td>
@@ -511,6 +517,7 @@ function openEdit(a) {
   $('eProxy').value = (a.proxy && a.proxy !== '默认') ? a.proxy : '';
   $('eEntry').value = a.entrypoint || 'cli';
   $('eConc').value = a.concurrency || 2;
+  $('eStyle').value = a.output_style || '';
   $('editErr').textContent = '';
   $('editModal').classList.add('on');
 }
@@ -520,6 +527,7 @@ async function saveEdit() {
     name: $('eName').value.trim() || undefined,
     proxy: $('eProxy').value.trim(),
     entrypoint: $('eEntry').value.trim() || undefined,
+    output_style: $('eStyle').value,
   };
   const c = parseInt($('eConc').value, 10);
   if (c >= 1 && c <= 16) body.concurrency = c;

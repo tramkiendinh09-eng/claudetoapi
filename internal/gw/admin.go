@@ -76,6 +76,7 @@ func (a *Admin) patch(w http.ResponseWriter, r *http.Request) {
 		Proxy       *string `json:"proxy"`     // pool name, raw URL or "" to clear
 		Entrypoint  *string `json:"entrypoint"`
 		Concurrency *int    `json:"concurrency"`
+		OutputStyle *string `json:"output_style"` // "", "concise", "proactive"; "" falls back to the global default
 		ClearError  bool    `json:"clear_error"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -111,6 +112,18 @@ func (a *Admin) patch(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Concurrency != nil && *req.Concurrency > 0 {
 			x.Concurrency = *req.Concurrency
+		}
+		if req.OutputStyle != nil {
+			v := strings.ToLower(strings.TrimSpace(*req.OutputStyle))
+			if v == "default" {
+				v = ""
+			}
+			if !mimicry.ValidStyleKey(v) {
+				writeErr(w, http.StatusBadRequest, "invalid_request_error",
+					`unknown output_style: use "", "concise" or "proactive"`)
+				return
+			}
+			x.OutputStyle = v
 		}
 		if req.ClearError {
 			x.Status = "active"
@@ -222,6 +235,7 @@ func (a *Admin) list(w http.ResponseWriter, r *http.Request) {
 		Concurrency      int               `json:"concurrency"`
 		RateWindow5h     *store.RateWindow `json:"rate_window_5h,omitempty"`
 		RateWindow7d     *store.RateWindow `json:"rate_window_7d,omitempty"`
+		OutputStyle      string            `json:"output_style,omitempty"`
 	}
 	// Expired window snapshots are stale (the window has reset since); drop
 	// them from the API response so the console shows "—" instead of 100%.
@@ -254,6 +268,7 @@ func (a *Admin) list(w http.ResponseWriter, r *http.Request) {
 			Proxy: proxyDisplay, Timezone: tzName, Language: geo.Language,
 			Concurrency: acc.Concurrency,
 			RateWindow5h: prune(acc.RateWindow5h), RateWindow7d: prune(acc.RateWindow7d),
+			OutputStyle: acc.OutputStyle,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"accounts": rows})

@@ -223,6 +223,15 @@ func (g *Gateway) resolveProxy(spec string) geoIdentity {
 	return defaultGeo
 }
 
+// accountStyle resolves the output style for one account: the account's own
+// choice wins; unset accounts inherit the global default.
+func accountStyle(acc *store.Account, global string) string {
+	if acc != nil && acc.OutputStyle != "" {
+		return acc.OutputStyle
+	}
+	return global
+}
+
 // geoFor returns the effective egress identity for an account.
 func (g *Gateway) geoFor(acc *store.Account) geoIdentity {
 	switch {
@@ -557,7 +566,7 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 			AccountUUID: acc.Extra.AccountUUID,
 			SessionID:   sessionID,
 			CacheTTL1h:  cacheTTLIs1h(body),
-			OutputStyle: g.cfg.Mimicry.OutputStyle,
+			OutputStyle: accountStyle(acc, g.cfg.Mimicry.OutputStyle),
 		})
 	} else {
 		// Real CLI traffic: only rewrite the device identity so the account
