@@ -616,6 +616,19 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	// Harvest the unified rate-limit windows from every response (they ride
+	// on success responses too) so the console can show 5h/7d quota state.
+	if w5, w7 := WindowsFromHeaders(resp.Header, time.Now()); w5 != nil || w7 != nil {
+		_ = g.st.Update(acc.ID, func(a *store.Account) {
+			if w5 != nil {
+				a.RateWindow5h = &store.RateWindow{Utilization: w5.Utilization, ResetAt: w5.ResetAt}
+			}
+			if w7 != nil {
+				a.RateWindow7d = &store.RateWindow{Utilization: w7.Utilization, ResetAt: w7.ResetAt}
+			}
+		})
+	}
+
 	_ = g.st.Update(acc.ID, func(a *store.Account) { now := time.Now(); a.LastUsedAt = &now })
 
 	switch {

@@ -196,19 +196,30 @@ type config2 = config.Config
 
 func (a *Admin) list(w http.ResponseWriter, r *http.Request) {
 	type row struct {
-		ID               int64      `json:"id"`
-		Name             string     `json:"name"`
-		Email            string     `json:"email"`
-		Status           string     `json:"status"`
-		Error            string     `json:"error,omitempty"`
-		RateLimitedUntil *time.Time `json:"rate_limited_until,omitempty"`
-		RateLimitReason  string     `json:"rate_limit_reason,omitempty"`
-		Entrypoint       string     `json:"entrypoint"`
-		HasRefresh       bool       `json:"has_refresh_token"`
-		Proxy            string     `json:"proxy,omitempty"`
-		Timezone         string     `json:"timezone,omitempty"`
-		Language         string     `json:"language,omitempty"`
-		Concurrency      int        `json:"concurrency"`
+		ID               int64             `json:"id"`
+		Name             string            `json:"name"`
+		Email            string            `json:"email"`
+		Status           string            `json:"status"`
+		Error            string            `json:"error,omitempty"`
+		RateLimitedUntil *time.Time        `json:"rate_limited_until,omitempty"`
+		RateLimitReason  string            `json:"rate_limit_reason,omitempty"`
+		Entrypoint       string            `json:"entrypoint"`
+		HasRefresh       bool              `json:"has_refresh_token"`
+		Proxy            string            `json:"proxy,omitempty"`
+		Timezone         string            `json:"timezone,omitempty"`
+		Language         string            `json:"language,omitempty"`
+		Concurrency      int               `json:"concurrency"`
+		RateWindow5h     *store.RateWindow `json:"rate_window_5h,omitempty"`
+		RateWindow7d     *store.RateWindow `json:"rate_window_7d,omitempty"`
+	}
+	// Expired window snapshots are stale (the window has reset since); drop
+	// them from the API response so the console shows "—" instead of 100%.
+	now := time.Now()
+	prune := func(w *store.RateWindow) *store.RateWindow {
+		if w == nil || !now.Before(w.ResetAt) {
+			return nil
+		}
+		return w
 	}
 	rows := make([]row, 0)
 	for _, acc := range a.st.Snapshot() {
@@ -231,6 +242,7 @@ func (a *Admin) list(w http.ResponseWriter, r *http.Request) {
 			Entrypoint: ep, HasRefresh: acc.Credentials.RefreshToken != "",
 			Proxy: proxyDisplay, Timezone: tzName, Language: geo.Language,
 			Concurrency: acc.Concurrency,
+			RateWindow5h: prune(acc.RateWindow5h), RateWindow7d: prune(acc.RateWindow7d),
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"accounts": rows})

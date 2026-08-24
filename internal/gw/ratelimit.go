@@ -123,3 +123,41 @@ func resetAt(h http.Header, window string, now time.Time) (time.Time, bool) {
 func SessionWindowFromHeaders(h http.Header, now time.Time) (time.Time, bool) {
 	return resetAt(h, "5h", now)
 }
+
+// WindowStat is one rate-limit window snapshot harvested from response
+// headers (present on success responses too, not only 429s).
+type WindowStat struct {
+	Utilization float64   `json:"utilization"` // 0..1
+	ResetAt     time.Time `json:"reset_at"`
+}
+
+// WindowsFromHeaders harvests the 5h and 7d unified rate-limit windows from
+// any upstream response. Nil when the window's headers are absent.
+func WindowsFromHeaders(h http.Header, now time.Time) (five, seven *WindowStat) {
+	if u, ok := utilizationOf(h, "5h"); ok {
+		if r, ok2 := resetAt(h, "5h", now); ok2 {
+			five = &WindowStat{Utilization: u, ResetAt: r}
+		}
+	}
+	if u, ok := utilizationOf(h, "7d"); ok {
+		if r, ok2 := resetAt(h, "7d", now); ok2 {
+			seven = &WindowStat{Utilization: u, ResetAt: r}
+		}
+	}
+	return five, seven
+}
+
+func utilizationOf(h http.Header, window string) (float64, bool) {
+	raw := strings.TrimSpace(h.Get("anthropic-ratelimit-unified-" + window + "-utilization"))
+	if raw == "" {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(raw, 64)
+	if err != nil || f < 0 {
+		return 0, false
+	}
+	if f > 1 {
+		f = 1
+	}
+	return f, true
+}

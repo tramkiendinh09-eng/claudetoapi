@@ -126,9 +126,9 @@ code{background:var(--panel2);padding:2px 7px;border-radius:5px;font-family:Cons
         <table id="accTable">
         <thead><tr>
           <th>ID</th><th>名称</th><th>邮箱</th><th>状态</th><th>入口</th>
-          <th>用量 今日 / 累计(入 + 缓存写 + 缓存读 / 出)</th><th>出口 IP / 时区</th><th style="text-align:right">操作</th>
+          <th>用量 今日 / 累计(入 + 缓存写 + 缓存读 / 出)</th><th>额度 5h / 7d</th><th>出口 IP / 时区</th><th style="text-align:right">操作</th>
         </tr></thead>
-        <tbody><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
+        <tbody><tr><td colspan="9" class="empty">加载中…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -351,6 +351,18 @@ function fmtTok(n) {
   return String(n || 0);
 }
 
+function quotaBar(w, label) {
+  if (!w || !w.utilization) return `<div class="muted" style="font-size:11px">${label} —</div>`;
+  const pct = Math.min(100, Math.round((w.utilization || 0) * 100));
+  const left = w.reset_at ? Math.max(0, Math.round((new Date(w.reset_at) - Date.now()) / 60000)) : null;
+  const leftStr = left == null ? '' : (left >= 60 ? Math.floor(left/60) + 'h' + (left%60) + 'm' : left + 'm');
+  const color = pct >= 90 ? 'var(--err)' : (pct >= 70 ? 'var(--warn)' : 'var(--ok)');
+  return `<div style="margin:2px 0" title="${label} 窗口已用 ${pct}%${leftStr ? ' · ' + leftStr + ' 后重置' : ''}">
+    <div style="display:flex;justify-content:space-between;font-size:10.5px" class="muted"><span>${label}</span><span>${pct}%${leftStr ? ' · ' + leftStr : ''}</span></div>
+    <div style="height:5px;border-radius:3px;background:var(--panel2);overflow:hidden"><div style="height:100%;width:${pct}%;background:${color};border-radius:3px"></div></div>
+  </div>`;
+}
+
 function renderAccounts(accs, usage) {
   const now = Date.now();
   let active = 0, cooling = 0, reqs = 0, reqsToday = 0;
@@ -376,7 +388,7 @@ function renderAccounts(accs, usage) {
   filterSel.value = accs.some(a => String(a.id) === curFilter) ? curFilter : '0';
   const tb = $('accTable').querySelector('tbody');
   if (!accs.length) {
-    tb.innerHTML = '<tr><td colspan="8" class="empty">还没有账号,点右上角「添加账号」</td></tr>';
+    tb.innerHTML = '<tr><td colspan="9" class="empty">还没有账号,点右上角「添加账号」</td></tr>';
   } else {
     tb.innerHTML = accs.map(a => {
       const agg = usage[a.id] || {};
@@ -403,6 +415,7 @@ function renderAccounts(accs, usage) {
           <div>今日 ${fmtTok(d.input)} + ${fmtTok(d.cache_write)}W + ${fmtTok(d.cache_read)}R / ${fmtTok(d.output)} <span class="muted">(${d.reqs||0} 次${d.errors ? ', ' + d.errors + ' 错' : ''})</span></div>
           <div class="muted">累计 ${fmtTok(t.input)} + ${fmtTok(t.cache_write)}W + ${fmtTok(t.cache_read)}R / ${fmtTok(t.output)} <span>(${t.reqs||0} 次${t.errors ? ', ' + t.errors + ' 错' : ''})</span></div>
         </td>
+        <td style="min-width:120px">${quotaBar(a.rate_window_5h, '5h')}${quotaBar(a.rate_window_7d, '7d')}</td>
         <td class="mono">${esc(a.proxy || '默认')}<br><small class="muted">${esc(a.timezone ? a.timezone + ' · ' + a.language : '无时区绑定')}</small></td>
         <td style="text-align:right;white-space:nowrap">
           ${actions}

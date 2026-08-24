@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -331,5 +332,58 @@ func TestBillingExhaustedFailsOver(t *testing.T) {
 	}
 	if cooled != 1 {
 		t.Fatalf("expected exactly 1 long-cooled account, got %d", cooled)
+	}
+}
+
+func TestWindowsFromHeaders(t *testing.T) {
+	h := http.Header{}
+	now := time.Now()
+	// absent headers -> nil
+	if w5, w7 := WindowsFromHeaders(h, now); w5 != nil || w7 != nil {
+		t.Fatal("empty headers must yield nil windows")
+	}
+	// full headers -> both parsed
+	h.Set("anthropic-ratelimit-unified-5h-utilization", "0.42")
+	h.Set("anthropic-ratelimit-unified-5h-reset", strconv.FormatInt(now.Add(3*time.Hour).Unix(), 10))
+	h.Set("anthropic-ratelimit-unified-7d-utilization", "1.5") // clamped to 1
+	h.Set("anthropic-ratelimit-unified-7d-reset", strconv.FormatInt(now.Add(5*24*time.Hour).Unix(), 10))
+	w5, w7 := WindowsFromHeaders(h, now)
+	if w5 == nil || w7 == nil {
+		t.Fatalf("windows not parsed: %+v %+v", w5, w7)
+	}
+	if w5.Utilization != 0.42 {
+		t.Fatalf("5h utilization = %v", w5.Utilization)
+	}
+	if w7.Utilization != 1.0 {
+		t.Fatalf("7d utilization should clamp to 1, got %v", w7.Utilization)
+	}
+	// expired reset -> window dropped (stale)
+	h.Set("anthropic-ratelimit-unified-5h-reset", strconv.FormatInt(now.Add(-time.Hour).Unix(), 10))
+	if w5, _ := WindowsFromHeaders(h, now); w5 != nil {
+		t.Fatal("expired 5h window must be nil")
+	}
+}
+
+func TestSuccessHarvestsRateWindows(t *testing.T) {
+	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reset := strconv.FormatInt(time.Now().Add(4*time.Hour).Unix(), 10)
+		w.Header().Set("anthropic-ratelimit-unified-5h-utilization", "0.55")
+		w.Header().Set("anthropic-ratelimit-unified-5h-reset", reset)
+		w.Header().Set("anthropic-ratelimit-unified-7d-utilization", "0.18")
+		w.Header().Set("anthropic-ratelimit-unified-7d-reset", strconv.FormatInt(time.Now().Add(6*24*time.Hour).Unix(), 10))
+		fmt.Fprint(w, `{"id":"msg_w","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":3,"output_tokens":2}}`)
+	}))
+	acc := addAccount(t, st, "w1")
+
+	w := postJSON(t, g, "/v1/messages")
+	if w.Code != 200 {
+		t.Fatalf("forward failed: %d", w.Code)
+	}
+	after, _ := st.Get(acc.ID)
+	if after.RateWindow5h == nil || after.RateWindow5h.Utilization != 0.55 {
+		t.Fatalf("5h window not harvested: %+v", after.RateWindow5h)
+	}
+	if after.RateWindow7d == nil || after.RateWindow7d.Utilization != 0.18 {
+		t.Fatalf("7d window not harvested: %+v", after.RateWindow7d)
 	}
 }

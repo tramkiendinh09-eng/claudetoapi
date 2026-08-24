@@ -30,6 +30,18 @@ type Fingerprint struct {
 	UpdatedAt  int64  `json:"updated_at"`
 }
 
+// RateWindow is the last observed state of one unified rate-limit window
+// (5h or 7d) harvested from upstream response headers.
+type RateWindow struct {
+	Utilization float64   `json:"utilization"` // 0..1
+	ResetAt     time.Time `json:"reset_at"`
+}
+
+// Expired reports whether the window has already reset (stale data).
+func (rw *RateWindow) Expired(now time.Time) bool {
+	return rw == nil || !now.Before(rw.ResetAt)
+}
+
 // Account is one upstream Claude OAuth subscription.
 type Account struct {
 	ID          int64       `json:"id"`
@@ -51,6 +63,10 @@ type Account struct {
 	RateLimitReason  string     `json:"rate_limit_reason,omitempty"`
 	LastUsedAt       *time.Time `json:"last_used_at,omitempty"`
 	Concurrency      int        `json:"concurrency,omitempty"`
+
+	// Last observed unified rate-limit windows (from success headers).
+	RateWindow5h *RateWindow `json:"rate_window_5h,omitempty"`
+	RateWindow7d *RateWindow `json:"rate_window_7d,omitempty"`
 }
 
 // Active reports whether the account can be scheduled now.
