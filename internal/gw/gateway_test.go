@@ -387,3 +387,24 @@ func TestSuccessHarvestsRateWindows(t *testing.T) {
 		t.Fatalf("7d window not harvested: %+v", after.RateWindow7d)
 	}
 }
+
+func TestRefreshEndpointParsesAccountID(t *testing.T) {
+	// /admin/accounts/{id}/refresh: pathID must read the pattern value, not
+	// the trailing segment ("refresh"), or every refresh returns 400.
+	req := httptest.NewRequest(http.MethodPost, "/admin/accounts/1/refresh", nil)
+	req.SetPathValue("id", "1")
+	id, err := pathID(req)
+	if err != nil {
+		t.Fatalf("pathID failed on refresh path: %v", err)
+	}
+	if id != 1 {
+		t.Fatalf("pathID = %d, want 1", id)
+	}
+
+	// DELETE/PATCH shape: pattern value still wins, id from the last segment.
+	req2 := httptest.NewRequest(http.MethodDelete, "/admin/accounts/7", nil)
+	req2.SetPathValue("id", "7")
+	if id, err := pathID(req2); err != nil || id != 7 {
+		t.Fatalf("pathID on plain id path: %d %v", id, err)
+	}
+}

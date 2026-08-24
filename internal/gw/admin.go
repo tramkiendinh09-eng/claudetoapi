@@ -503,6 +503,16 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func pathID(r *http.Request) (int64, error) {
+	// Prefer the ServeMux pattern value: the trailing-segment fallback below
+	// misparses sub-actions like /admin/accounts/{id}/refresh (last segment
+	// is "refresh", not the id).
+	if v := r.PathValue("id"); v != "" {
+		var id int64
+		if _, err := fmt.Sscanf(v, "%d", &id); err != nil || id <= 0 {
+			return 0, fmt.Errorf("invalid account id")
+		}
+		return id, nil
+	}
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	if len(parts) == 0 {
 		return 0, fmt.Errorf("missing id")
