@@ -56,6 +56,7 @@ func main() {
 	gateway := gw.New(cfg, st)
 	gateway.SetTelemetry(gw.NewTelemetryManager(gateway))
 	admin := gw.NewAdmin(cfg, st, gateway, version)
+	admin.SetConfigPath(*cfgPath)
 
 	mux := http.NewServeMux()
 

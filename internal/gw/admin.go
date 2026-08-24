@@ -4,12 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"claudetoapi/internal/config"
+	"claudetoapi/internal/mimicry"
 	"claudetoapi/internal/oauth"
 	"claudetoapi/internal/profile"
 	"claudetoapi/internal/store"
@@ -18,16 +22,21 @@ import (
 
 // Admin exposes account management behind the admin key.
 type Admin struct {
-	cfg     *config.Config
-	st      *store.Store
-	gw      *Gateway
-	version string
+	cfg       *config.Config
+	cfgPath   string // config file for runtime settings persistence ("" = in-memory only)
+	st        *store.Store
+	gw        *Gateway
+	version   string
+	settingsMu sync.Mutex
 }
 
 // NewAdmin builds the admin API; ver is reported by /admin/info.
 func NewAdmin(cfg *config.Config, st *store.Store, g *Gateway, ver string) *Admin {
 	return &Admin{cfg: cfg, st: st, gw: g, version: ver}
 }
+
+// SetConfigPath enables persisting runtime settings back to the config file.
+func (a *Admin) SetConfigPath(p string) { a.cfgPath = p }
 
 // Mount registers admin routes on mux. All routes require X-Admin-Key.
 func (a *Admin) Mount(mux *http.ServeMux) {
@@ -50,6 +59,7 @@ func (a *Admin) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/usage/logs", wrap(a.usageLogs))
 	mux.HandleFunc("GET /admin/info", wrap(a.info))
 	mux.HandleFunc("PATCH /admin/accounts/{id}", wrap(a.patch))
+	mux.HandleFunc("PUT /admin/settings", wrap(a.putSettings))
 	mux.HandleFunc("POST /admin/proxies/test", wrap(a.testProxy))
 }
 
@@ -172,6 +182,7 @@ func (a *Admin) info(w http.ResponseWriter, r *http.Request) {
 		"sdk_version":        prof.SDKVersion,
 		"default_proxy":      a.cfg.DefaultProxyURL != "",
 		"dispatch_header":    a.cfg.Mimicry.DispatchHeader,
+		"output_style":       a.cfg.Mimicry.OutputStyle,
 		"telemetry":          a.gw.Telemetry().Enabled(),
 		"telemetry_runners":  a.gw.Telemetry().Stats(),
 		"accounts":           len(a.st.Snapshot()),
@@ -494,6 +505,70 @@ func (a *Admin) usageLogs(w http.ResponseWriter, r *http.Request) {
 		accountID = v
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"logs": a.gw.UsageRecords(accountID, limit)})
+}
+
+// putSettings updates runtime settings (currently output_style) in memory
+// and, when the config path is known, atomically back into config.json.
+func (a *Admin) putSettings(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		OutputStyle *string `json:"output_style"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	if req.OutputStyle != nil {
+		v := strings.ToLower(strings.TrimSpace(*req.OutputStyle))
+		if v == "default" {
+			v = ""
+		}
+		if !mimicry.ValidStyleKey(v) {
+			writeErr(w, http.StatusBadRequest, "invalid_request_error",
+				`unknown output_style: use "", "concise" or "proactive"`)
+			return
+		}
+		a.settingsMu.Lock()
+		a.cfg.Mimicry.OutputStyle = v
+		a.settingsMu.Unlock()
+		if a.cfgPath != "" {
+			if err := updateConfigFile(a.cfgPath, "output_style", v); err != nil {
+				slog.Warn("settings_persist_failed", "error", err.Error())
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"output_style": a.cfg.Mimicry.OutputStyle})
+}
+
+// updateConfigFile rewrites one JSON key in the config file atomically.
+func updateConfigFile(path, key, value string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return err
+	}
+	mimic, _ := doc["mimicry"].(map[string]any)
+	if mimic == nil {
+		mimicry := map[string]any{}
+		doc["mimicry"] = mimicry
+		mimic = mimicry
+	}
+	if value == "" {
+		delete(mimic, key)
+	} else {
+		mimic[key] = value
+	}
+	out, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

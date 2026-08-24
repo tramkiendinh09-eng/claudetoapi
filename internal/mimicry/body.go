@@ -89,6 +89,7 @@ type TransformOptions struct {
 	AccountUUID    string // may be empty
 	SessionID      string // stable per-conversation UUID
 	CacheTTL1h     bool
+	OutputStyle    string // "", "concise" or "proactive"
 }
 
 // ProfileView is the subset of profile.Profile the mimicry layer needs
@@ -126,11 +127,26 @@ func Transform(body map[string]any, o TransformOptions) {
 func rewriteSystem(body map[string]any, o TransformOptions) {
 	original, hadSystem := systemText(body)
 
+	// Active output style: the CLI swaps the identity line (nAE) and adds a
+	// dedicated style section (rAE) right after the identity block.
+	identity := o.Persona.Identity
 	blocks := []any{
 		map[string]any{"type": "text", "text": o.Attribution},
-		map[string]any{"type": "text", "text": o.Persona.Identity, "cache_control": cacheControl(o.CacheTTL1h)},
-		map[string]any{"type": "text", "text": expansionPrompt(), "cache_control": cacheControl(o.CacheTTL1h)},
 	}
+	if style := StyleFor(o.OutputStyle); style != nil {
+		identity = StyledIdentity
+		blocks = append(blocks,
+			map[string]any{"type": "text", "text": identity, "cache_control": cacheControl(o.CacheTTL1h)},
+			map[string]any{"type": "text", "text": styleSection(*style), "cache_control": cacheControl(o.CacheTTL1h)},
+		)
+	} else {
+		blocks = append(blocks,
+			map[string]any{"type": "text", "text": identity, "cache_control": cacheControl(o.CacheTTL1h)},
+		)
+	}
+	blocks = append(blocks,
+		map[string]any{"type": "text", "text": expansionPrompt(), "cache_control": cacheControl(o.CacheTTL1h)},
+	)
 	body["system"] = blocks
 
 	if !hadSystem || original == "" || looksLikeCLIPrompt(original) {

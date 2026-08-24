@@ -173,3 +173,67 @@ func TestIsClaudeCodeClient(t *testing.T) {
 		t.Fatal("non-CLI UA must not be detected")
 	}
 }
+
+func TestOutputStyleInjection(t *testing.T) {
+	body := map[string]any{
+		"model":      "claude-sonnet-4-5-20250929",
+		"max_tokens": 100,
+		"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+	Transform(body, TransformOptions{
+		Persona:     PersonaCLI,
+		Attribution: "x-anthropic-billing-header: cc_version=2.1.241.abc",
+		ClientID:    strings.Repeat("a", 64),
+		SessionID:   "11111111-1111-1111-1111-111111111111",
+		OutputStyle: "concise",
+	})
+	blocks, _ := body["system"].([]any)
+	if len(blocks) != 4 { // attribution + identity + style + expansion
+		t.Fatalf("concise style must add one block, got %d", len(blocks))
+	}
+	ident := blocks[1].(map[string]any)["text"].(string)
+	if !strings.Contains(ident, `your "Output Style" below`) {
+		t.Fatalf("identity line not swapped: %q", ident[:80])
+	}
+	style := blocks[2].(map[string]any)["text"].(string)
+	if !strings.HasPrefix(style, "# Output Style: Concise\n") {
+		t.Fatalf("style section header wrong: %q", style[:40])
+	}
+	if !strings.Contains(style, "Lead with the result") || !strings.Contains(style, "Concise Style Active") {
+		t.Fatal("style section missing the verbatim payload text")
+	}
+}
+
+func TestOutputStyleDefaultUnchanged(t *testing.T) {
+	body := map[string]any{
+		"model":      "claude-sonnet-4-5-20250929",
+		"max_tokens": 100,
+		"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+	Transform(body, TransformOptions{
+		Persona:     PersonaCLI,
+		Attribution: "x-anthropic-billing-header: cc_version=2.1.241.abc",
+		ClientID:    strings.Repeat("a", 64),
+		SessionID:   "11111111-1111-1111-1111-111111111111",
+	})
+	blocks, _ := body["system"].([]any)
+	if len(blocks) != 3 {
+		t.Fatalf("default style must keep 3 blocks, got %d", len(blocks))
+	}
+	if got := blocks[1].(map[string]any)["text"].(string); got != PersonaCLI.Identity {
+		t.Fatal("default identity must stay the persona identity")
+	}
+}
+
+func TestStyleFor(t *testing.T) {
+	if StyleFor("") != nil || StyleFor("nope") != nil {
+		t.Fatal("empty/unknown keys must resolve to nil")
+	}
+	c := StyleFor("Concise") // case-insensitive
+	if c == nil || c.Name != "Concise" {
+		t.Fatal("concise style must resolve case-insensitively")
+	}
+	if !ValidStyleKey("") || !ValidStyleKey("concise") || ValidStyleKey("nope") {
+		t.Fatal("ValidStyleKey matrix broken")
+	}
+}

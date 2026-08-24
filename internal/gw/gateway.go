@@ -557,6 +557,7 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 			AccountUUID: acc.Extra.AccountUUID,
 			SessionID:   sessionID,
 			CacheTTL1h:  cacheTTLIs1h(body),
+			OutputStyle: g.cfg.Mimicry.OutputStyle,
 		})
 	} else {
 		// Real CLI traffic: only rewrite the device identity so the account

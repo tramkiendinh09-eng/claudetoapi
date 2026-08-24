@@ -100,6 +100,13 @@ code{background:var(--panel2);padding:2px 7px;border-radius:5px;font-family:Cons
       <div class="stat"><div class="muted">今日 tokens(入/出)</div><div class="v" style="font-size:16px" id="stTodayTok">—</div></div>
       <div class="stat"><div class="muted">今日缓存 读/写</div><div class="v" style="font-size:16px" id="stTodayCache">—</div></div>
       <div class="stat"><div class="muted">伪装版本</div><div class="v" id="stProfile" style="font-size:15px">—</div></div>
+      <div class="stat"><div class="muted">输出风格(等效 /config outputStyle)</div><div class="v" style="font-size:14px;margin-top:2px">
+        <select id="styleSel" style="font-size:13px;padding:5px 8px" onchange="setStyle(this.value)">
+          <option value="">默认</option>
+          <option value="concise">Concise(简洁)</option>
+          <option value="proactive">Proactive(主动执行)</option>
+        </select>
+      </div></div>
       <div class="stat"><div class="muted">连接复用(命中/新建)</div><div class="v" id="stPool" style="font-size:15px">—</div></div>
       <div class="stat"><div class="muted">遥测旁路</div><div class="v" id="stTelemetry" style="font-size:15px">—</div></div>
     </div>
@@ -299,6 +306,7 @@ function renderInfo(info) {
   $('stTelemetry').innerHTML = info.telemetry
     ? '<span style="color:var(--ok)">开启</span><br><small class="muted">' + (info.telemetry_runners || 0) + ' 个账号在跑</small>'
     : '<span class="muted">关闭</span>';
+  $('styleSel').value = info.output_style || '';
   const base = location.origin;
   $('ccEnv').textContent = `export ANTHROPIC_BASE_URL=${base}`;
   $('baseHint').textContent = base;
@@ -477,6 +485,16 @@ async function clearAccountError(id) {
     await api(`/admin/accounts/${id}`, {method: 'PATCH', body: JSON.stringify({clear_error: true})});
     toast('已恢复', 'ok'); refreshAll();
   } catch (e) { toast(e.message, 'err'); }
+}
+
+async function setStyle(v) {
+  try {
+    await api('/admin/settings', {method: 'PUT', body: JSON.stringify({output_style: v})});
+    toast(v ? '输出风格已切换为 ' + v : '输出风格已恢复默认', 'ok');
+  } catch (e) {
+    toast(e.message, 'err');
+    refreshAll();
+  }
 }
 
 async function refreshToken(id) {

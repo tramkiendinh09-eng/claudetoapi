@@ -32,6 +32,10 @@ type Mimicry struct {	// DefaultEntrypoint seeds per-account cc_entrypoint ("cli
 	DisableDatelineNormalization bool `json:"disable_dateline_normalization"`
 	// MaxAttempts bounds per-request account failover attempts.
 	MaxAttempts int `json:"max_attempts"`
+	// OutputStyle selects a built-in Claude Code output style injected into
+	// the system prompt for mimic-mode requests: "" (default), "concise" or
+	// "proactive" — same effect as `claude /config outputStyle=…`.
+	OutputStyle string `json:"output_style"`
 }
 
 // Proxy is a named proxy with geographic identity. Accounts bound to a named

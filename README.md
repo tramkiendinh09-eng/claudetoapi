@@ -155,6 +155,16 @@ claude   # Claude Code 直接可用;其他 Anthropic SDK 客户端同理
 - **CORS**:网关端点开放跨域(浏览器端 SDK 可直连),预检 86400s 缓存;
 - **503 Retry-After**:账号全部限流时,按最近的限流窗口重置时间返回 `Retry-After`。
 
+## 输出风格(等效 `claude /config outputStyle=…`)
+
+控制台概览卡可直接切换输出风格(即时生效,原子写回 config.json):
+
+- **默认** — 不注入;
+- **Concise** — Opus 冗长的临时补丁同款:注入真实 CLI 的内置 Concise 风格(身份句替换 + `# Output Style: Concise` 段,原文照搬 claude.exe 2.1.241 payload);
+- **Proactive** — 立即执行、最小化打断、偏好行动。
+
+对走完整 mimicry 的第三方客户端生效;真实 Claude Code 客户端自身已带该配置,透传不动。API:`PUT /admin/settings {"output_style":"concise"}`。
+
 ## 用量台账
 
 每账号两级用量记录,持久化在 `data/usage_history.json`(重启不丢):
