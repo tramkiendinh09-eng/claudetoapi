@@ -60,6 +60,7 @@ func (a *Admin) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/info", wrap(a.info))
 	mux.HandleFunc("PATCH /admin/accounts/{id}", wrap(a.patch))
 	mux.HandleFunc("PUT /admin/settings", wrap(a.putSettings))
+	mux.HandleFunc("POST /admin/accounts/{id}/reauthorize", wrap(a.reauthorize))
 	mux.HandleFunc("POST /admin/proxies/test", wrap(a.testProxy))
 }
 
@@ -520,6 +521,78 @@ func (a *Admin) usageLogs(w http.ResponseWriter, r *http.Request) {
 		accountID = v
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"logs": a.gw.UsageRecords(accountID, limit)})
+}
+
+// reauthorize replaces the credentials of an EXISTING account (sessionKey or
+// OAuth code), keeping its identity: name, proxy binding, fingerprint,
+// rate-limit windows and usage history all stay. This is the recovery path
+// for accounts whose refresh token died (invalid_grant).
+func (a *Admin) reauthorize(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	acc, err := a.st.Get(id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "not_found_error", err.Error())
+		return
+	}
+	var req struct {
+		SessionKey string `json:"session_key"`
+		Code       string `json:"code"`
+		State      string `json:"state"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	// The exchange must egress through the account's own proxy: same exit
+	// the credentials will be used from afterwards.
+	oc := oauth.New(a.gw.geoFor(acc).ProxyURL)
+	var tr *oauth.TokenResponse
+	switch {
+	case req.SessionKey != "":
+		tr, err = oc.AuthorizeWithSessionKey(r.Context(), req.SessionKey)
+	case req.Code != "":
+		tr, err = oc.CompleteBrowserFlow(r.Context(), req.Code, req.State)
+	default:
+		writeErr(w, http.StatusBadRequest, "invalid_request_error", "session_key or code required")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "api_error", "re-authorization failed: "+err.Error())
+		return
+	}
+	_ = a.st.Update(id, func(x *store.Account) {
+		x.Credentials.AccessToken = tr.AccessToken
+		if tr.RefreshToken != "" {
+			x.Credentials.RefreshToken = tr.RefreshToken
+		}
+		if tr.ExpiresIn > 0 {
+			x.Credentials.ExpiresAt = time.Now().Add(time.Duration(tr.ExpiresIn) * time.Second).UTC().Format(time.RFC3339)
+		} else {
+			x.Credentials.ExpiresAt = time.Now().Add(365 * 24 * time.Hour).UTC().Format(time.RFC3339)
+		}
+		if tr.Account != nil {
+			if tr.Account.UUID != "" {
+				x.Extra.AccountUUID = tr.Account.UUID
+			}
+			if x.Extra.Email == "" && tr.Account.EmailAddress != "" {
+				x.Extra.Email = tr.Account.EmailAddress
+			}
+		}
+		// Bring the account back to life: clear the auth error and cooldown.
+		x.Status = "active"
+		x.Error = ""
+		x.RateLimitedUntil = nil
+		x.RateLimitReason = ""
+	})
+	slog.Info("account_reauthorized", "account_id", id, "account", acc.Name)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id": id, "name": acc.Name, "reauthorized": true,
+		"email": acc.Extra.Email, "expires_at": time.Now().Add(time.Duration(tr.ExpiresIn) * time.Second).UTC().Format(time.RFC3339),
+	})
 }
 
 // putSettings updates runtime settings (currently output_style) in memory

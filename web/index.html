@@ -53,8 +53,8 @@ tr:last-child td{border-bottom:none}
 #modal{position:fixed;inset:0;background:rgba(5,7,12,.7);display:none;align-items:flex-start;justify-content:center;z-index:40;padding:40px 16px;overflow:auto}
 #modal.on{display:flex}
 #modal .box{width:560px;max-width:100%;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px}
-#editModal{position:fixed;inset:0;background:rgba(5,7,12,.7);display:none;align-items:center;justify-content:center;z-index:45}
-#editModal.on{display:flex}
+#editModal,#reauthModal{position:fixed;inset:0;background:rgba(5,7,12,.7);display:none;align-items:center;justify-content:center;z-index:45}
+#editModal.on,#reauthModal.on{display:flex}
 .tabs{display:flex;gap:6px;margin-bottom:16px;border-bottom:1px solid var(--line)}
 .tabs button{background:none;border:none;color:var(--muted);padding:8px 14px;cursor:pointer;font-size:13px;border-bottom:2px solid transparent}
 .tabs button.on{color:var(--acc);border-bottom-color:var(--acc)}
@@ -195,6 +195,19 @@ code{background:var(--panel2);padding:2px 7px;border-radius:5px;font-family:Cons
     <div style="margin-top:16px;display:flex;gap:8px">
       <button class="btn primary" style="flex:1" onclick="saveEdit()">保存</button>
       <button class="btn" onclick="closeEdit()">取消</button>
+    </div>
+  </div>
+</div>
+
+<div id="reauthModal">
+  <div class="box" style="width:460px">
+    <h3 style="margin-bottom:6px">重新授权 <span id="reauthName" class="muted"></span> <button class="btn sm" style="float:right" onclick="closeReauth()">✕</button></h3>
+    <div class="hint" style="margin-bottom:10px">账号凭据已失效时,粘贴 claude.ai 的 sessionKey 重新授权(账号名、代理、指纹、用量历史全部保留):登录 claude.ai → F12 → Application → Cookies → 复制 sessionKey 的值。</div>
+    <label>sessionKey</label><input id="raKey" class="mono" placeholder="sk-ant-sid01-…">
+    <div id="reauthErr" class="hint" style="color:var(--err);margin-top:8px"></div>
+    <div style="margin-top:14px;display:flex;gap:8px">
+      <button class="btn primary" style="flex:1" onclick="doReauth()">重新授权</button>
+      <button class="btn" onclick="closeReauth()">取消</button>
     </div>
   </div>
 </div>
@@ -411,7 +424,7 @@ function renderAccounts(accs, usage) {
       let status, cls, actions = '';
       if (a.status === 'error') {
         status = '错误: ' + (a.error || ''); cls = 'err';
-        actions = `<button class="btn sm" onclick="clearAccountError(${a.id})">恢复</button>`;
+        actions = `<button class="btn sm" onclick="openReauth(${a.id}, '${esc(a.name)}')">重新授权</button><button class="btn sm" onclick="clearAccountError(${a.id})">恢复</button>`;
       }
       else if (a.rate_limited_until && new Date(a.rate_limited_until) > new Date()) {
         const left = Math.ceil((new Date(a.rate_limited_until) - now) / 60000);
@@ -484,6 +497,25 @@ function renderLogs() {
       <td class="mono">${fmtTok(l.output)}</td>
     </tr>`;
   }).join('');
+}
+
+let reauthId = 0;
+function openReauth(id, name) {
+  reauthId = id;
+  $('reauthName').textContent = '#' + id + ' ' + name;
+  $('raKey').value = '';
+  $('reauthErr').textContent = '';
+  $('reauthModal').classList.add('on');
+}
+function closeReauth() { $('reauthModal').classList.remove('on'); }
+async function doReauth() {
+  const key = $('raKey').value.trim();
+  if (!key) return $('reauthErr').textContent = '请粘贴 sessionKey';
+  try {
+    const r = await api(`/admin/accounts/${reauthId}/reauthorize`, {method: 'POST', body: JSON.stringify({session_key: key})});
+    toast(`「${r.name}」重新授权成功`, 'ok');
+    closeReauth(); refreshAll();
+  } catch (e) { $('reauthErr').textContent = e.message; }
 }
 
 async function clearAccountError(id) {

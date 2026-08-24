@@ -141,11 +141,21 @@ func (g *Gateway) accessToken(ctx context.Context, acc *store.Account) (string, 
 	oc := oauth.New(proxy)
 	tr, err := oc.Refresh(ctx, acc.Credentials.RefreshToken)
 	if err != nil {
-		// Refresh failures are usually transient or revocation; cool the
-		// account down rather than hard-disabling on the first strike.
+		// invalid_grant means the refresh token family is dead (rotated by
+		// another client holding the same credentials, or revoked). Retrying
+		// can never succeed — surface a re-authorization error immediately
+		// instead of endless cooldown loops.
+		if strings.Contains(err.Error(), "invalid_grant") {
+			g.setError(acc.ID, "需要重新授权: refresh token 已失效(invalid_grant)——同一凭据可能在其他客户端刷新轮换或会话被吊销,请在控制台对该账号执行「重新授权」")
+			return "", fmt.Errorf("account %d refresh: %w", acc.ID, err)
+		}
+		// Other failures are usually transient; cool the account down
+		// rather than hard-disabling on the first strike.
 		g.cooldown(acc.ID, 10*time.Minute, "oauth_refresh_failed: "+err.Error())
 		return "", fmt.Errorf("account %d refresh: %w", acc.ID, err)
 	}
+	slog.Info("token_refreshed", "account_id", acc.ID, "account", acc.Name,
+		"rotated_rt", tr.RefreshToken != "")
 	newAcc, _ := g.st.Get(acc.ID)
 	_ = g.st.Update(acc.ID, func(a *store.Account) {
 		a.Credentials.AccessToken = tr.AccessToken

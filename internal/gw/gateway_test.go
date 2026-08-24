@@ -423,3 +423,29 @@ func TestAccountStyleOverridesGlobal(t *testing.T) {
 		t.Fatalf("no styles anywhere must stay empty, got %q", got)
 	}
 }
+
+func TestInvalidGrantDisablesInsteadOfCooldownLoop(t *testing.T) {
+	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(400)
+		fmt.Fprint(w, `{"error": "invalid_grant", "error_description": "Refresh token not found or invalid"}`)
+	}))
+	acc := addAccount(t, st, "dead-rt")
+	// put the account into the state a dead refresh token leaves behind
+	_ = st.Update(acc.ID, func(a *store.Account) {
+		a.Credentials.AccessToken = ""
+		a.Credentials.RefreshToken = "expired-token"
+		a.Credentials.ExpiresAt = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	})
+
+	postJSON(t, g, "/v1/messages")
+	after, _ := st.Get(acc.ID)
+	if after.Status != "error" {
+		t.Fatalf("invalid_grant must surface as re-authorization error, got status %q", after.Status)
+	}
+	if !strings.Contains(after.Error, "重新授权") {
+		t.Fatalf("error must point at the reauthorize action: %q", after.Error)
+	}
+	if after.RateLimitedUntil != nil && time.Until(*after.RateLimitedUntil) > 0 {
+		t.Fatal("invalid_grant must not cooldown-loop; the account is already in error state")
+	}
+}
