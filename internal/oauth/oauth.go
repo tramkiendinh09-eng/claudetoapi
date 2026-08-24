@@ -80,11 +80,19 @@ type BeginResult struct {
 	State        string
 }
 
-// pending tracks in-memory PKCE sessions for the browser flow.
+// pending tracks in-memory PKCE sessions for the browser flow, with creation
+// time so abandoned sessions get swept.
 var (
 	pendingMu sync.Mutex
-	pending   = map[string]string{} // state -> code_verifier
+	pending   = map[string]pendingFlow{} // state -> {verifier, created}
 )
+
+const pendingFlowTTL = 30 * time.Minute
+
+type pendingFlow struct {
+	verifier string
+	created  time.Time
+}
 
 // BeginBrowserFlow builds the authorization URL the user should open. The
 // redirect lands on platform.claude.com/oauth/code/callback; the user copies
@@ -109,7 +117,8 @@ func (c *Client) BeginBrowserFlow() (*BeginResult, error) {
 	q.Set("state", state)
 
 	pendingMu.Lock()
-	pending[state] = verifier
+	sweepPendingLocked()
+	pending[state] = pendingFlow{verifier: verifier, created: time.Now()}
 	pendingMu.Unlock()
 
 	return &BeginResult{
@@ -120,6 +129,9 @@ func (c *Client) BeginBrowserFlow() (*BeginResult, error) {
 
 // CompleteBrowserFlow exchanges the authorization code for tokens.
 // code may be "authCode" or "authCode#state"; state overrides the split.
+// A failed exchange KEEPS the session: the code from a successful browser
+// authorization is one-shot, but a typo or transient error must not burn the
+// whole flow — the operator can retry the same code after fixing it.
 func (c *Client) CompleteBrowserFlow(ctx context.Context, code, state string) (*TokenResponse, error) {
 	authCode := code
 	codeState := ""
@@ -130,13 +142,30 @@ func (c *Client) CompleteBrowserFlow(ctx context.Context, code, state string) (*
 		state = codeState
 	}
 	pendingMu.Lock()
-	verifier := pending[state]
-	delete(pending, state)
+	sweepPendingLocked()
+	flow, ok := pending[state]
 	pendingMu.Unlock()
-	if verifier == "" {
-		return nil, fmt.Errorf("unknown or expired state (browser flow sessions expire on use)")
+	if !ok {
+		return nil, fmt.Errorf("unknown or expired state (sessions expire after %s; generate a new authorize link)", pendingFlowTTL)
 	}
-	return c.exchange(ctx, authCode, verifier, state)
+	tr, err := c.exchange(ctx, authCode, flow.verifier, state)
+	if err == nil {
+		// Success consumes the session; failures leave it retryable.
+		pendingMu.Lock()
+		delete(pending, state)
+		pendingMu.Unlock()
+	}
+	return tr, err
+}
+
+// sweepPendingLocked drops sessions older than the TTL; caller holds pendingMu.
+func sweepPendingLocked() {
+	cutoff := time.Now().Add(-pendingFlowTTL)
+	for s, f := range pending {
+		if f.created.Before(cutoff) {
+			delete(pending, s)
+		}
+	}
 }
 
 // ---- token endpoint ----
