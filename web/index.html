@@ -200,10 +200,27 @@ code{background:var(--panel2);padding:2px 7px;border-radius:5px;font-family:Cons
 </div>
 
 <div id="reauthModal">
-  <div class="box" style="width:460px">
+  <div class="box" style="width:480px">
     <h3 style="margin-bottom:6px">重新授权 <span id="reauthName" class="muted"></span> <button class="btn sm" style="float:right" onclick="closeReauth()">✕</button></h3>
-    <div class="hint" style="margin-bottom:10px">账号凭据已失效时,粘贴 claude.ai 的 sessionKey 重新授权(账号名、代理、指纹、用量历史全部保留):登录 claude.ai → F12 → Application → Cookies → 复制 sessionKey 的值。</div>
-    <label>sessionKey</label><input id="raKey" class="mono" placeholder="sk-ant-sid01-…">
+    <div class="hint" style="margin-bottom:10px">账号凭据已失效时,用下面任一方式重新授权。账号名、代理、指纹、用量历史全部保留。</div>
+    <div class="tabs" style="margin-bottom:12px">
+      <button class="on" data-m="sk" onclick="switchReauth(this)">sessionKey</button>
+      <button data-m="oauth" onclick="switchReauth(this)">浏览器 OAuth</button>
+    </div>
+    <div id="ra-sk">
+      <label>claude.ai 的 sessionKey cookie</label>
+      <input id="raKey" class="mono" placeholder="sk-ant-sid01-…">
+      <div class="hint">登录 claude.ai → F12 → Application → Cookies → 复制 sessionKey 的值。</div>
+    </div>
+    <div id="ra-oauth" style="display:none">
+      <button class="btn" onclick="beginReauthOAuth()" id="raBeginBtn">① 生成授权链接</button>
+      <div id="raOauthBox" style="display:none;margin-top:10px">
+        <label>② 在浏览器打开并完成授权(登录该账号的 Claude)</label>
+        <div class="row"><input id="raOauthUrl" readonly class="mono"><button class="btn sm" onclick="window.open(document.getElementById('raOauthUrl').value)">打开</button></div>
+        <label>③ 粘贴回调地址里的 code(或整段 code#state)</label>
+        <input id="raOauthCode" class="mono" placeholder="platform.claude.com/oauth/code/callback?code=…&state=…">
+      </div>
+    </div>
     <div id="reauthErr" class="hint" style="color:var(--err);margin-top:8px"></div>
     <div style="margin-top:14px;display:flex;gap:8px">
       <button class="btn primary" style="flex:1" onclick="doReauth()">重新授权</button>
@@ -499,20 +516,43 @@ function renderLogs() {
   }).join('');
 }
 
-let reauthId = 0;
+let reauthId = 0, reauthOauthState = '';
 function openReauth(id, name) {
   reauthId = id;
   $('reauthName').textContent = '#' + id + ' ' + name;
   $('raKey').value = '';
+  $('raOauthCode').value = '';
   $('reauthErr').textContent = '';
   $('reauthModal').classList.add('on');
 }
 function closeReauth() { $('reauthModal').classList.remove('on'); }
+function switchReauth(btn) {
+  document.querySelectorAll('#reauthModal .tabs button').forEach(b => b.classList.remove('on'));
+  btn.classList.add('on');
+  $('ra-sk').style.display = btn.dataset.m === 'sk' ? '' : 'none';
+  $('ra-oauth').style.display = btn.dataset.m === 'oauth' ? '' : 'none';
+}
+async function beginReauthOAuth() {
+  try {
+    const r = await api('/admin/oauth/url');
+    reauthOauthState = r.state;
+    $('raOauthUrl').value = r.authorize_url;
+    $('raOauthBox').style.display = '';
+    $('raBeginBtn').textContent = '① 重新生成授权链接';
+  } catch (e) { $('reauthErr').textContent = e.message; }
+}
 async function doReauth() {
   const key = $('raKey').value.trim();
-  if (!key) return $('reauthErr').textContent = '请粘贴 sessionKey';
+  const code = $('raOauthCode').value.trim();
+  const useOAuth = document.querySelector('#reauthModal .tabs button.on').dataset.m === 'oauth';
+  if (useOAuth) {
+    if (!code) return $('reauthErr').textContent = '请粘贴回调 code';
+  } else if (!key) {
+    return $('reauthErr').textContent = '请粘贴 sessionKey';
+  }
   try {
-    const r = await api(`/admin/accounts/${reauthId}/reauthorize`, {method: 'POST', body: JSON.stringify({session_key: key})});
+    const body = useOAuth ? {code, state: reauthOauthState} : {session_key: key};
+    const r = await api(`/admin/accounts/${reauthId}/reauthorize`, {method: 'POST', body: JSON.stringify(body)});
     toast(`「${r.name}」重新授权成功`, 'ok');
     closeReauth(); refreshAll();
   } catch (e) { $('reauthErr').textContent = e.message; }
