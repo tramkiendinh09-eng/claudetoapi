@@ -755,7 +755,8 @@ func (g *Gateway) recordAttempt(acc *store.Account, opts forwardOpts, status int
 	slog.Info("forward",
 		"account", acc.Name, "model", opts.Model, "status", status,
 		"stream", opts.Stream, "ms", time.Since(start).Milliseconds(),
-		"in", u.input, "out", u.output, "cache_w", u.cacheWrite, "cache_r", u.cacheRead)
+		"in", u.input, "out", u.output, "cache_w", u.cacheWrite, "cache_r", u.cacheRead,
+		"cc", opts.IsCC, "ua", shortUA(opts.ClientHeaders.Get("User-Agent")))
 }
 
 // usageAcc accumulates the usage object of one upstream response. input and
@@ -1036,4 +1037,15 @@ func versionTriple(ua string) ([3]int, bool) {
 		t[j] = n
 	}
 	return t, true
+}
+
+// shortUA condenses a User-Agent for one-line logging.
+func shortUA(ua string) string {
+	if i := strings.IndexByte(ua, ' '); i > 0 {
+		ua = ua[:i]
+	}
+	if len(ua) > 40 {
+		ua = ua[:40]
+	}
+	return ua
 }
