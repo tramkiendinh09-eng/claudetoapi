@@ -578,18 +578,22 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 	isNewConversation := prevReqID == ""
 
 	thinkingOn := hasThinking(body)
+	signedThinking := mimicry.HasSignedThinking(body)
 	fastMode := false
 	if sp, _ := body["speed"].(string); strings.EqualFold(sp, "fast") {
 		fastMode = true
 	}
 	beta := mimicry.ComputeBetas(opts.Model, mimicry.BetaOptions{
-		ThinkingEnabled: thinkingOn,
+		ThinkingEnabled: thinkingOn || signedThinking,
 		RedactThinking:  g.cfg.Mimicry.RedactThinking,
 		CountTokens:     opts.CountTokens,
 		Auxiliary:       opts.CountTokens,
 		CacheTTL1h:      cacheTTLIs1h(body),
 		FastMode:        fastMode,
 	})
+	if in := opts.ClientHeaders.Get("anthropic-beta"); in != "" {
+		beta = mimicry.MergeBetas(beta, in)
+	}
 	// First turn of a conversation: emit the input_prompt telemetry marker
 	// (carries the chain's cc_prompt_id, exactly like the captured stream).
 	if g.telemetry != nil && isNewConversation {
@@ -643,56 +647,67 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 		}
 	}
 
-	payload, err := mimicry.EncodeBody(body)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "api_error", "encode body: "+err.Error())
-		return true
-	}
-
 	// count_tokens goes to its own endpoint (and never consumes a
 	// generation); everything else to /v1/messages?beta=true.
 	target := strings.TrimRight(g.upstreamBase, "/") + "/v1/messages?beta=true"
 	if opts.CountTokens {
 		target = strings.TrimRight(g.upstreamBase, "/") + "/v1/messages/count_tokens"
 	}
-	upstream, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(payload))
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "api_error", err.Error())
-		return true
-	}
 	sessionHdr := promptID
-	upstream.Header = BuildUpstreamHeaders(HeaderBuildInput{
-		Token:          token,
-		Beta:           beta,
-		Profile:        prof,
-		UserAgent:      orDefault(fp.UserAgent, prof.UserAgent),
-		SDKVersion:     orDefault(fp.SDKVersion, prof.SDKVersion),
-		OS:             fp.OS,
-		Arch:           fp.Arch,
-		Runtime:        fp.Runtime,
-		RuntimeVersion: fp.RuntimeVersion,
-		SessionID:      sessionHdr,
-		ClientReqID:    mimicry.NewUUID(),
-		AcceptLanguage: geo.Language,
-		// Pool OAuth accounts always stamp the sticky identity. Passthrough
-		// of inbound UA/OS/Arch is what mixed 2.1.246 genuine CLI with
-		// 2.1.241 Linux/arm64 mimic on the same token.
-		Mimic:         true,
-		DispatchV2S:   g.cfg.Mimicry.DispatchHeader,
-		IsStream:      opts.Stream,
-		ClientHeaders: opts.ClientHeaders,
-	})
-
-	// Ordered transport: header wire order matches the real CLI (Go's own
-	// writer would alphabetize them), connections pooled per proxy.
 	client := &http.Client{
 		Transport: SharedOrderedTransport(geo.ProxyURL),
 		Timeout:   0, // streaming: rely on request context
 	}
-	resp, err := client.Do(upstream)
-	if err != nil {
-		slog.Warn("upstream_request_error", "account_id", acc.ID, "error", err.Error())
-		return false // network error: fail over
+
+	strippedThinking := false
+	var resp *http.Response
+	for {
+		payload, err := mimicry.EncodeBody(body)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "api_error", "encode body: "+err.Error())
+			return true
+		}
+		upstream, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(payload))
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "api_error", err.Error())
+			return true
+		}
+		upstream.Header = BuildUpstreamHeaders(HeaderBuildInput{
+			Token:          token,
+			Beta:           beta,
+			Profile:        prof,
+			UserAgent:      orDefault(fp.UserAgent, prof.UserAgent),
+			SDKVersion:     orDefault(fp.SDKVersion, prof.SDKVersion),
+			OS:             fp.OS,
+			Arch:           fp.Arch,
+			Runtime:        fp.Runtime,
+			RuntimeVersion: fp.RuntimeVersion,
+			SessionID:      sessionHdr,
+			ClientReqID:    mimicry.NewUUID(),
+			AcceptLanguage: geo.Language,
+			// Pool OAuth accounts always stamp the sticky identity. Passthrough
+			// of inbound UA/OS/Arch is what mixed 2.1.246 genuine CLI with
+			// 2.1.241 Linux/arm64 mimic on the same token.
+			Mimic:         true,
+			DispatchV2S:   g.cfg.Mimicry.DispatchHeader,
+			IsStream:      opts.Stream,
+			ClientHeaders: opts.ClientHeaders,
+		})
+		resp, err = client.Do(upstream)
+		if err != nil {
+			slog.Warn("upstream_request_error", "account_id", acc.ID, "error", err.Error())
+			return false
+		}
+		if resp.StatusCode == http.StatusBadRequest && !strippedThinking && !opts.CountTokens {
+			msg := peekErrBody(resp)
+			if classifyErrorBody(msg) == ErrThinkingSig && mimicry.StripThinkingBlocks(body) {
+				slog.Warn("thinking_signature_retry", "account_id", acc.ID, "account", acc.Name, "body", truncateStr(msg, 300))
+				_ = resp.Body.Close()
+				strippedThinking = true
+				continue
+			}
+		}
+		break
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -761,6 +776,10 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 	case resp.StatusCode >= 400:
 		msg := readErrBody(resp)
 		g.recordAttempt(acc, opts, resp.StatusCode, start, usageAcc{})
+		slog.Warn("forward",
+			"account", acc.Name, "model", opts.Model, "status", resp.StatusCode,
+			"stream", opts.Stream, "ms", time.Since(start).Milliseconds(),
+			"body", truncateStr(msg, 300), "cc", opts.IsCC)
 		// Account-attributable failures inside a 4xx body: billing exhausted
 		// cools the account down; model-access gaps only fail this attempt
 		// over to the next account. Everything else is client error and
@@ -968,6 +987,15 @@ func copyHeaders(w http.ResponseWriter, resp *http.Response) {
 
 func readErrBody(resp *http.Response) string {
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	return string(raw)
+}
+
+// peekErrBody reads the error payload and puts it back so a later
+// readErrBody / client copy still sees the same bytes.
+func peekErrBody(resp *http.Response) string {
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	_ = resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(raw))
 	return string(raw)
 }
 

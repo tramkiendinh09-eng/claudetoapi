@@ -15,6 +15,7 @@ const (
 	ErrGeoBlocked  // egress IP in an unsupported region — proxy problem, account is fine
 	ErrModelAccess // account lacks this model — fail over, keep the account
 	ErrBilling     // credits/spending cap exhausted — long cooldown
+	ErrThinkingSig // historical thinking block signature rejected
 )
 
 var errPatterns = []struct {
@@ -54,6 +55,12 @@ var errPatterns = []struct {
 		"billing to be enabled",
 		"monthly spending cap",
 		"monthly spending limit",
+	}},
+	{ErrThinkingSig, []string{
+		"invalid `signature` in `thinking`",
+		"invalid signature in thinking",
+		"invalid `signature` in `redacted_thinking`",
+		"thinking.signature",
 	}},
 }
 

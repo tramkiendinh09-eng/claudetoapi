@@ -267,7 +267,10 @@ func normalizeParams(body map[string]any, o TransformOptions) {
 				}
 				think["budget_tokens"] = clamped
 			}
-			if _, ok := think["display"]; !ok {
+			// Do not force display:"omitted" onto a conversation that already
+			// carries signed thinking: omitted vs plaintext uses different
+			// signature material and the next turn 400s.
+			if _, ok := think["display"]; !ok && !HasSignedThinking(body) {
 				think["display"] = "omitted"
 			}
 			// context_management accompanies thinking by default (payload Xph).

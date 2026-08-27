@@ -1,6 +1,7 @@
 package mimicry
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,9 +24,21 @@ func DecodeBody(raw []byte) (map[string]any, error) {
 	return body, nil
 }
 
-// EncodeBody marshals deterministically.
+// EncodeBody marshals without HTML escaping. Go's default encoder turns
+// <>& into \u003c\u003e\u0026; thinking signatures are bound to the block
+// text, and a wire form the real CLI never emits is extra surface.
 func EncodeBody(body map[string]any) ([]byte, error) {
-	return json.Marshal(body)
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(body); err != nil {
+		return nil, err
+	}
+	out := buf.Bytes()
+	if n := len(out); n > 0 && out[n-1] == '\n' {
+		out = out[:n-1]
+	}
+	return out, nil
 }
 
 // ReadJSONBody reads an http request body with a size limit and decodes it.

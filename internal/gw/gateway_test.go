@@ -2,6 +2,7 @@ package gw
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -139,6 +140,42 @@ func TestForwardSSEUsage(t *testing.T) {
 	rec := g.ledger.recordsFor(0, 10)[0]
 	if rec.Input != 5 || rec.CacheRead != 500 || rec.Output != 42 {
 		t.Fatalf("sse usage wrong: %+v", rec)
+	}
+}
+
+func TestThinkingSignatureRetryStripsBlocks(t *testing.T) {
+	calls := 0
+	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		raw, _ := io.ReadAll(r.Body)
+		hasThinking := strings.Contains(string(raw), `"type":"thinking"`)
+		if calls == 1 {
+			if !hasThinking {
+				t.Fatal("first attempt must keep thinking blocks")
+			}
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"type":"error","error":{"type":"invalid_request_error","message":"messages.3.content.25: Invalid `+"`signature`"+` in `+"`thinking`"+` block"}}`)
+			return
+		}
+		if hasThinking {
+			t.Fatal("retry must strip thinking blocks")
+		}
+		w.Header().Set("content-type", "application/json")
+		fmt.Fprint(w, `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	addAccount(t, st, "a1")
+
+	body := `{"model":"claude-opus-5","max_tokens":64,"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"thinking","thinking":"plan","signature":"deadbeef"},{"type":"text","text":"done"}]},{"role":"user","content":"next"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	req.Header.Set("content-type", "application/json")
+	req.Header.Set("anthropic-beta", "claude-code-20250219,thinking-display-updates-2026-08-18,task-budgets-2026-03-13")
+	w := httptest.NewRecorder()
+	g.handleMessages(w, req, false)
+	if w.Code != 200 {
+		t.Fatalf("retry should succeed: %d %s", w.Code, w.Body.String())
+	}
+	if calls != 2 {
+		t.Fatalf("expected 2 upstream calls, got %d", calls)
 	}
 }
 

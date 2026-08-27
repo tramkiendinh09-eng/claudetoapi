@@ -71,6 +71,64 @@ func TestComputeBetasP0Rules(t *testing.T) {
 	if strings.Contains(plain, "redact-thinking") {
 		t.Fatalf("redact-thinking must default off: %s", plain)
 	}
+	if !strings.Contains(plain, "thinking-display-updates-2026-08-18") {
+		t.Fatalf("thinking requests must carry thinking-display-updates: %s", plain)
+	}
+	off := ComputeBetas("claude-sonnet-4-5", BetaOptions{})
+	if strings.Contains(off, "thinking-display-updates") {
+		t.Fatalf("non-thinking requests must not carry thinking-display-updates: %s", off)
+	}
+}
+
+func TestMergeBetasKeepsCLIExtras(t *testing.T) {
+	base := ComputeBetas("claude-opus-5", BetaOptions{ThinkingEnabled: true})
+	got := MergeBetas(base, "claude-code-20250219,thinking-display-updates-2026-08-18,task-budgets-2026-03-13,garbage SPACE")
+	if !strings.Contains(got, "task-budgets-2026-03-13") {
+		t.Fatalf("inbound CLI extra beta dropped: %s", got)
+	}
+	if strings.Contains(got, "garbage") || strings.Contains(got, "SPACE") {
+		t.Fatalf("junk inbound beta leaked: %s", got)
+	}
+}
+
+func TestStripThinkingBlocks(t *testing.T) {
+	body := map[string]any{
+		"messages": []any{
+			map[string]any{"role": "user", "content": "hi"},
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "thinking", "thinking": "secret", "signature": "sig"},
+				map[string]any{"type": "text", "text": "ok"},
+				map[string]any{"type": "redacted_thinking", "data": "xx"},
+			}},
+		},
+	}
+	if !HasSignedThinking(body) {
+		t.Fatal("expected signed thinking")
+	}
+	if !StripThinkingBlocks(body) {
+		t.Fatal("expected strip")
+	}
+	if HasSignedThinking(body) {
+		t.Fatal("thinking survived strip")
+	}
+	blocks := body["messages"].([]any)[1].(map[string]any)["content"].([]any)
+	if len(blocks) != 1 || blocks[0].(map[string]any)["text"] != "ok" {
+		t.Fatalf("kept blocks = %#v", blocks)
+	}
+}
+
+func TestEncodeBodyDoesNotHTMLEscape(t *testing.T) {
+	raw, err := EncodeBody(map[string]any{"text": "a < b & c > d"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(raw)
+	if strings.Contains(s, `\u003c`) || strings.Contains(s, `\u003e`) || strings.Contains(s, `\u0026`) {
+		t.Fatalf("HTML escaped: %s", s)
+	}
+	if !strings.Contains(s, `a < b & c > d`) {
+		t.Fatalf("raw brackets missing: %s", s)
+	}
 }
 
 func TestTransformP0Fixes(t *testing.T) {

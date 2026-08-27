@@ -49,6 +49,10 @@ func ComputeBetas(model string, o BetaOptions) string {
 			betas = append(betas, profile.BetaTokenCounting)
 		}
 		betas = append(betas, profile.BetaContextManagement)
+		// 2.1.247 payload registry: thinking-display-updates rides with
+		// interleaved thinking. Dropping it invalidates signatures the CLI
+		// already minted under this beta (Invalid `signature` in `thinking`).
+		betas = append(betas, profile.BetaThinkingDisplay)
 	}
 	// prompt-caching-scope: first-party default-on.
 	betas = append(betas, profile.BetaPromptCachingScope)
@@ -66,6 +70,58 @@ func ComputeBetas(model string, o BetaOptions) string {
 		betas = append(betas, profile.BetaFastMode)
 	}
 	return strings.Join(dedupe(betas), ",")
+}
+
+// MergeBetas unions the computed CLI beta list with inbound anthropic-beta
+// tokens. Identity/capability we always emit stay first; extra tokens the
+// real CLI already used to sign thinking blocks are appended. Garbage and
+// hop-by-hop junk are ignored.
+func MergeBetas(computed, inbound string) string {
+	out := splitBetas(computed)
+	seen := make(map[string]struct{}, len(out)+8)
+	for _, t := range out {
+		seen[t] = struct{}{}
+	}
+	for _, t := range splitBetas(inbound) {
+		if !looksLikeBeta(t) {
+			continue
+		}
+		if _, ok := seen[t]; ok {
+			continue
+		}
+		seen[t] = struct{}{}
+		out = append(out, t)
+	}
+	return strings.Join(out, ",")
+}
+
+func splitBetas(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func looksLikeBeta(t string) bool {
+	if len(t) < 8 || len(t) > 80 {
+		return false
+	}
+	for _, r := range t {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
+		default:
+			return false
+		}
+	}
+	return strings.Count(t, "-") >= 1
 }
 
 func dedupe(in []string) []string {
