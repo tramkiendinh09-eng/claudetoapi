@@ -4,11 +4,12 @@
 // CLI release pins together: the UA version, the bundled @anthropic-ai/sdk
 // version (X-Stainless-Package-Version), default max_tokens and the beta
 // header vocabulary. Real CLI releases lock these values in pairs — e.g.
-// claude-cli/2.1.241 bundles SDK 0.208.0 — so a gateway that mixes versions
+// claude-cli/2.1.247 bundles SDK 0.208.0 — so a gateway that mixes versions
 // from different releases produces client identities that never existed in
-// the wild (verified against the local claude.exe 2.1.241 reverse-engineered
-// payload: VERSION="2.1.241", packageVersion "0.208.0", max-output defaults
-// P3b=32000 / D3b=128000).
+// the wild (verified against the local claude.exe 2.1.247 reverse-engineered
+// payload: VERSION="2.1.247", packageVersion "0.208.0", BUILD_TIME
+// 2026-08-26T05:55:19Z, native runtime Bun/1.4.1 with Stainless still
+// reporting runtime "node").
 package profile
 
 import "time"
@@ -16,13 +17,15 @@ import "time"
 // Profile is an immutable CLI-version fingerprint bundle.
 type Profile struct {
 	Name             string
-	CLIVersion       string           // e.g. "2.1.241"
-	SDKVersion       string           // e.g. "0.208.0" (X-Stainless-Package-Version)
-	UserAgent        string           // full User-Agent line
+	CLIVersion       string            // e.g. "2.1.247"
+	SDKVersion       string            // e.g. "0.208.0" (X-Stainless-Package-Version)
+	UserAgent        string            // full User-Agent line
 	Stainless        map[string]string // X-Stainless-* values (Lang/OS/Arch/Runtime/RuntimeVersion)
-	DefaultMaxTokens int              // CLI default when the request omits max_tokens
-	MaxTokensUpper   int              // CLI hard upper bound
-	TimeoutHeader    string           // X-Stainless-Timeout default
+	BuildTime        string            // CLI BUILD_TIME, stamped into telemetry env
+	GitSHA           string            // CLI GIT_SHA (diagnostic)
+	DefaultMaxTokens int               // CLI default when the request omits max_tokens
+	MaxTokensUpper   int               // CLI hard upper bound
+	TimeoutHeader    string            // X-Stainless-Timeout default
 }
 
 // Beta token vocabulary observed in the 2.1.241 payload registry.
@@ -43,32 +46,67 @@ const (
 	BetaThinkingDisplay     = "thinking-display-updates-2026-08-18"
 )
 
-// v2_1_241 mirrors claude-cli 2.1.241 (win32 build c87e2742, 2026-08-22).
+func stainlessNodeLinuxArm64(sdk string) map[string]string {
+	return map[string]string{
+		"X-Stainless-Lang":            "js",
+		"X-Stainless-Package-Version": sdk,
+		"X-Stainless-OS":              "Linux",
+		"X-Stainless-Arch":            "arm64",
+		"X-Stainless-Runtime":         "node",
+		"X-Stainless-Runtime-Version": "v24.3.0",
+	}
+}
+
+// v2_1_241 kept so already-provisioned fingerprints can still resolve the
+// profile they were born with. OS/arch/runtime stay sticky on the account;
+// only CLI version/UA/SDK ride the upgrade to Default.
 var v2_1_241 = &Profile{
 	Name:             "2.1.241",
 	CLIVersion:       "2.1.241",
 	SDKVersion:       "0.208.0",
 	UserAgent:        "claude-cli/2.1.241 (external, cli)",
-	Stainless: map[string]string{
-		"X-Stainless-Lang":            "js",
-		"X-Stainless-Package-Version": "0.208.0",
-		"X-Stainless-OS":              "Linux",
-		"X-Stainless-Arch":            "arm64",
-		"X-Stainless-Runtime":         "node",
-		"X-Stainless-Runtime-Version": "v24.3.0",
-	},
+	Stainless:        stainlessNodeLinuxArm64("0.208.0"),
+	BuildTime:        "2026-08-22T22:46:48Z",
 	DefaultMaxTokens: 32000,
 	MaxTokensUpper:   128000,
 	TimeoutHeader:    "600",
 }
 
-// Registry of known profiles; Default is used for new identities.
+// v2_1_247 mirrors native claude-cli 2.1.247 (win32-x64 bun compile,
+// GIT_SHA 89c726188daf6407b6b57bf67d312f2958e5b9f2, 2026-08-26).
+// UA builder: `claude-cli/${VERSION} (external, ${ENTRYPOINT??"cli"})`.
+// Stainless SDK still reports runtime "node" even though the native binary
+// is Bun/1.4.1 (payload yc() node branch + process.version).
+var v2_1_247 = &Profile{
+	Name:             "2.1.247",
+	CLIVersion:       "2.1.247",
+	SDKVersion:       "0.208.0",
+	UserAgent:        "claude-cli/2.1.247 (external, cli)",
+	Stainless:        stainlessNodeLinuxArm64("0.208.0"),
+	BuildTime:        "2026-08-26T05:55:19Z",
+	GitSHA:           "89c726188daf6407b6b57bf67d312f2958e5b9f2",
+	DefaultMaxTokens: 32000,
+	MaxTokensUpper:   128000,
+	TimeoutHeader:    "600",
+}
+
+// Registry of known profiles; Default is used for new identities and for
+// one-way version upgrades of existing fingerprints.
 var (
 	Registry = map[string]*Profile{
 		v2_1_241.Name: v2_1_241,
+		v2_1_247.Name: v2_1_247,
 	}
-	Default = v2_1_241
+	Default = v2_1_247
 )
+
+// Lookup returns a named profile, or Default when the name is unknown/empty.
+func Lookup(name string) *Profile {
+	if p, ok := Registry[name]; ok {
+		return p
+	}
+	return Default
+}
 
 // FingerprintSalt is the CLI's cc_version fingerprint salt (payload constant
 // OAE, function Vzl: sha256(salt + chars[4,7,20] + version)[:3]).
@@ -84,9 +122,10 @@ type Model struct {
 	DisplayName string `json:"display_name"`
 }
 
-// DefaultModels mirrors the CLI's advertised model set (2.1.241 registry).
+// DefaultModels mirrors the CLI's advertised model set (2.1.247 registry).
 var DefaultModels = []Model{
 	{ID: "claude-fable-5", Type: "model", DisplayName: "Claude Fable 5"},
+	{ID: "claude-mythos-5", Type: "model", DisplayName: "Claude Mythos 5"},
 	{ID: "claude-opus-5", Type: "model", DisplayName: "Claude Opus 5"},
 	{ID: "claude-opus-4-8", Type: "model", DisplayName: "Claude Opus 4.8"},
 	{ID: "claude-opus-4-7", Type: "model", DisplayName: "Claude Opus 4.7"},

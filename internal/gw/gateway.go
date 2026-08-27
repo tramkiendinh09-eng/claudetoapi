@@ -285,28 +285,46 @@ func (g *Gateway) pick(sessionHash string, exclude map[int64]bool) *store.Accoun
 
 // ---- fingerprint resolution ----
 
-// resolveFingerprint returns the per-account identity, creating it lazily and
-// adopting newer real-client UAs (version-only drift) with the same poison
-// guards sub2api learned the hard way (implausible versions cause permanent
-// headerless-429 loops upstream).
+// resolveFingerprint returns the per-account identity, creating it lazily.
+// Inbound client UAs are never adopted onto a pool OAuth account — the same
+// token presenting 2.1.246 Windows passthrough and 2.1.241 Linux/arm64 mimic
+// is what got an account banned. CLI version may ride a one-way upgrade to
+// the configured profile; OS/arch/runtime stay sticky.
 func (g *Gateway) resolveFingerprint(acc *store.Account, clientUA string) (fp *store.Fingerprint, prof *profile.Profile) {
-	prof = profile.Default
-	if p, ok := profile.Registry[g.cfg.ProfileName]; ok {
-		prof = p
-	}
+	prof = profile.Lookup(g.cfg.ProfileName)
 
 	if acc.Fingerprint != nil && acc.Fingerprint.ClientID != "" {
 		fp = acc.Fingerprint
-		// Adopt a newer well-formed claude-cli UA from real traffic.
-		if acceptableUA(clientUA) && newerVersion(clientUA, fp.UserAgent) {
+		if inbound := strings.TrimSpace(clientUA); inbound != "" && inbound != orDefault(fp.UserAgent, prof.UserAgent) {
+			slog.Debug("identity_unify_ignore_inbound_ua",
+				"account_id", acc.ID,
+				"inbound", shortUA(inbound),
+				"sticky", shortUA(orDefault(fp.UserAgent, prof.UserAgent)))
+		}
+		upgraded := upgradeFingerprint(fp, prof)
+		missingPlatform := fp.OS == "" || fp.Arch == "" || fp.Runtime == "" || fp.RuntimeVersion == ""
+		if upgraded != nil {
+			fp.UserAgent = upgraded.UserAgent
+			fp.SDKVersion = upgraded.SDKVersion
+			fp.Profile = upgraded.Profile
+			fp.UpdatedAt = upgraded.UpdatedAt
+		}
+		seedStickyPlatform(fp, prof)
+		if upgraded != nil || missingPlatform {
+			snap := *fp
 			_ = g.st.Update(acc.ID, func(a *store.Account) {
-				if a.Fingerprint != nil {
-					a.Fingerprint.UserAgent = strings.TrimSpace(clientUA)
-					a.Fingerprint.SDKVersion = prof.SDKVersion
-					a.Fingerprint.UpdatedAt = time.Now().Unix()
+				if a.Fingerprint == nil {
+					return
 				}
+				a.Fingerprint.UserAgent = snap.UserAgent
+				a.Fingerprint.SDKVersion = snap.SDKVersion
+				a.Fingerprint.Profile = snap.Profile
+				a.Fingerprint.OS = snap.OS
+				a.Fingerprint.Arch = snap.Arch
+				a.Fingerprint.Runtime = snap.Runtime
+				a.Fingerprint.RuntimeVersion = snap.RuntimeVersion
+				a.Fingerprint.UpdatedAt = snap.UpdatedAt
 			})
-			fp.UserAgent = strings.TrimSpace(clientUA)
 		}
 		return fp, prof
 	}
@@ -315,31 +333,12 @@ func (g *Gateway) resolveFingerprint(acc *store.Account, clientUA string) (fp *s
 	if entry == "" {
 		entry = "cli"
 	}
-	newFP := &store.Fingerprint{
-		ClientID:   newClientID(),
-		Entrypoint: entry,
-		Profile:    prof.Name,
-		UserAgent:  prof.UserAgent,
-		SDKVersion: prof.SDKVersion,
-		UpdatedAt:  time.Now().Unix(),
-	}
+	newFP := newStickyFingerprint(prof, entry)
 	_ = g.st.Update(acc.ID, func(a *store.Account) { a.Fingerprint = newFP })
 	return newFP, prof
 }
 
-// provisionFingerprint creates the persistent identity for a new account
-// with the requested entrypoint persona.
-func (g *Gateway) provisionFingerprint(acc *store.Account, entrypoint string) *store.Fingerprint {
-	if acc.Fingerprint != nil && acc.Fingerprint.ClientID != "" {
-		return acc.Fingerprint
-	}
-	prof := profile.Default
-	if p, ok := profile.Registry[g.cfg.ProfileName]; ok {
-		prof = p
-	}
-	if entrypoint == "" {
-		entrypoint = g.cfg.Mimicry.DefaultEntrypoint
-	}
+func newStickyFingerprint(prof *profile.Profile, entrypoint string) *store.Fingerprint {
 	fp := &store.Fingerprint{
 		ClientID:   newClientID(),
 		Entrypoint: entrypoint,
@@ -348,6 +347,57 @@ func (g *Gateway) provisionFingerprint(acc *store.Account, entrypoint string) *s
 		SDKVersion: prof.SDKVersion,
 		UpdatedAt:  time.Now().Unix(),
 	}
+	seedStickyPlatform(fp, prof)
+	return fp
+}
+
+func seedStickyPlatform(fp *store.Fingerprint, prof *profile.Profile) {
+	if fp == nil || prof == nil {
+		return
+	}
+	if fp.OS == "" {
+		fp.OS = prof.Stainless["X-Stainless-OS"]
+	}
+	if fp.Arch == "" {
+		fp.Arch = prof.Stainless["X-Stainless-Arch"]
+	}
+	if fp.Runtime == "" {
+		fp.Runtime = prof.Stainless["X-Stainless-Runtime"]
+	}
+	if fp.RuntimeVersion == "" {
+		fp.RuntimeVersion = prof.Stainless["X-Stainless-Runtime-Version"]
+	}
+}
+
+// upgradeFingerprint returns a copy of version fields when the configured
+// profile is newer than the stored UA. OS/arch/runtime are left alone.
+func upgradeFingerprint(fp *store.Fingerprint, prof *profile.Profile) *store.Fingerprint {
+	if fp == nil || prof == nil {
+		return nil
+	}
+	current := orDefault(fp.UserAgent, "")
+	if current == "" || newerVersion(prof.UserAgent, current) {
+		out := *fp
+		out.UserAgent = prof.UserAgent
+		out.SDKVersion = prof.SDKVersion
+		out.Profile = prof.Name
+		out.UpdatedAt = time.Now().Unix()
+		return &out
+	}
+	return nil
+}
+
+// provisionFingerprint creates the persistent identity for a new account
+// with the requested entrypoint persona.
+func (g *Gateway) provisionFingerprint(acc *store.Account, entrypoint string) *store.Fingerprint {
+	if acc.Fingerprint != nil && acc.Fingerprint.ClientID != "" {
+		return acc.Fingerprint
+	}
+	prof := profile.Lookup(g.cfg.ProfileName)
+	if entrypoint == "" {
+		entrypoint = g.cfg.Mimicry.DefaultEntrypoint
+	}
+	fp := newStickyFingerprint(prof, entrypoint)
 	acc.Fingerprint = fp
 	return fp
 }
@@ -506,12 +556,6 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 		return false // account unusable now; fail over
 	}
 
-	// Telemetry bypass: lazily start the account's background runner
-	// (flag-eval pulls + first-party events) on its egress path.
-	if g.telemetry != nil {
-		g.telemetry.EnsureStarted(acc, token)
-	}
-
 	geo := g.geoFor(acc)
 	// Align the dateline date with the exit IP's calendar day: the CLI stamps
 	// its local date into the prompt, so a US egress must carry the US date.
@@ -520,6 +564,13 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 	}
 
 	fp, prof := g.resolveFingerprint(acc, opts.ClientHeaders.Get("User-Agent"))
+
+	// Telemetry bypass: lazily start the account's background runner
+	// (flag-eval pulls + first-party events) on its egress path. Fingerprint
+	// is resolved first so a CLI version upgrade is visible to the runner.
+	if g.telemetry != nil {
+		g.telemetry.EnsureStarted(acc, token)
+	}
 	persona := mimicry.PersonaFor(fp.Entrypoint)
 	// chain.Next advances the conversation chain: promptID stays stable,
 	// prevReqID links to the previous request (first request: empty).
@@ -579,8 +630,10 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 			OutputStyle: accountStyle(acc, g.cfg.Mimicry.OutputStyle),
 		})
 	} else {
-		// Real CLI traffic: only rewrite the device identity so the account
-		// presents one stable machine.
+		// Real CLI traffic: keep the client's system/tool stack, but pin
+		// device id AND billing cc_version to the account's sticky CLI
+		// version so the same token never presents two releases at once.
+		mimicry.AlignBillingCLIVersion(body, prof.CLIVersion)
 		if fp.ClientID != "" {
 			sid := sessionUUID(SessionHash(body))
 			if sid == "" {
@@ -609,15 +662,22 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 	}
 	sessionHdr := promptID
 	upstream.Header = BuildUpstreamHeaders(HeaderBuildInput{
-		Token:         token,
-		Beta:          beta,
-		Profile:       prof,
-		UserAgent:     orDefault(fp.UserAgent, prof.UserAgent),
-		SDKVersion:    orDefault(fp.SDKVersion, prof.SDKVersion),
-		SessionID:     sessionHdr,
-		ClientReqID:   mimicry.NewUUID(),
+		Token:          token,
+		Beta:           beta,
+		Profile:        prof,
+		UserAgent:      orDefault(fp.UserAgent, prof.UserAgent),
+		SDKVersion:     orDefault(fp.SDKVersion, prof.SDKVersion),
+		OS:             fp.OS,
+		Arch:           fp.Arch,
+		Runtime:        fp.Runtime,
+		RuntimeVersion: fp.RuntimeVersion,
+		SessionID:      sessionHdr,
+		ClientReqID:    mimicry.NewUUID(),
 		AcceptLanguage: geo.Language,
-		Mimic:         !opts.IsCC,
+		// Pool OAuth accounts always stamp the sticky identity. Passthrough
+		// of inbound UA/OS/Arch is what mixed 2.1.246 genuine CLI with
+		// 2.1.241 Linux/arm64 mimic on the same token.
+		Mimic:         true,
 		DispatchV2S:   g.cfg.Mimicry.DispatchHeader,
 		IsStream:      opts.Stream,
 		ClientHeaders: opts.ClientHeaders,
@@ -964,10 +1024,11 @@ func isUUIDShape(s string) bool {
 	return true
 }
 
-// acceptableUA guards the fingerprint store against poisoned UAs (wrong
-// shape, local builds, implausible sentinel versions) and against versions
-// more than 2 majors ahead of the profile (a 999.x sentinel gets adopted and
-// then triggers permanent headerless-429 loops upstream).
+// acceptableUA reports whether ua is a well-formed official claude-cli
+// User-Agent: `claude-cli/X.Y.Z` or `claude-cli/X.Y.Z (external, cli)`
+// (also sdk-cli / claude-vscode / extra agent-sdk, client-app, workload
+// tags). Used as a diagnostic filter — inbound UAs are no longer written
+// onto the per-account fingerprint.
 func acceptableUA(ua string) bool {
 	ua = strings.TrimSpace(ua)
 	if ua == "" || len(ua) > 256 {
@@ -977,17 +1038,11 @@ func acceptableUA(ua string) bool {
 		return false
 	}
 	rest := strings.TrimPrefix(ua, "claude-cli/")
-	dots := 0
-	for _, c := range rest {
-		if c == '.' {
-			dots++
-			continue
-		}
-		if c < '0' || c > '9' {
-			return false // rejects -local / +build suffixes
-		}
+	ver, suffix := splitCLIVersion(rest)
+	if !cliVersionShape(ver) {
+		return false
 	}
-	if dots != 2 || len(rest) < 5 {
+	if suffix != "" && !validCLISuffix(suffix) {
 		return false
 	}
 	if t, ok := versionTriple(ua); ok {
@@ -998,6 +1053,38 @@ func acceptableUA(ua string) bool {
 		}
 	}
 	return true
+}
+
+func splitCLIVersion(rest string) (ver, suffix string) {
+	rest = strings.TrimSpace(rest)
+	if i := strings.IndexByte(rest, ' '); i >= 0 {
+		return rest[:i], strings.TrimSpace(rest[i+1:])
+	}
+	return rest, ""
+}
+
+func cliVersionShape(ver string) bool {
+	dots := 0
+	digits := 0
+	for _, c := range ver {
+		if c == '.' {
+			dots++
+			continue
+		}
+		if c < '0' || c > '9' {
+			return false
+		}
+		digits++
+	}
+	return dots == 2 && digits >= 3 && len(ver) >= 5
+}
+
+func validCLISuffix(suffix string) bool {
+	if !strings.HasPrefix(suffix, "(") || !strings.HasSuffix(suffix, ")") {
+		return false
+	}
+	inner := strings.TrimSpace(suffix[1 : len(suffix)-1])
+	return strings.HasPrefix(inner, "external,")
 }
 
 // newerVersion compares product/x.y.z versions of the same product.
@@ -1032,11 +1119,17 @@ func versionTriple(ua string) ([3]int, bool) {
 		return t, false
 	}
 	rest := ua[i+1:]
+	if sp := strings.IndexByte(rest, ' '); sp >= 0 {
+		rest = rest[:sp]
+	}
 	parts := strings.Split(rest, ".")
 	if len(parts) < 3 {
 		return t, false
 	}
 	for j := 0; j < 3; j++ {
+		if parts[j] == "" {
+			return t, false
+		}
 		n := 0
 		for _, c := range parts[j] {
 			if c < '0' || c > '9' {

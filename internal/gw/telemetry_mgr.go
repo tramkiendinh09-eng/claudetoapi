@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,13 +49,32 @@ func (m *TelemetryManager) EnsureStarted(acc *store.Account, accessToken string)
 	fp, prof := m.gw.resolveFingerprint(acc, "")
 	geo := m.gw.geoFor(acc)
 	ua := orDefault(fp.UserAgent, prof.UserAgent)
+	runtimeVer := orDefault(fp.RuntimeVersion, prof.Stainless["X-Stainless-Runtime-Version"])
+	env := telemetry.DefaultEnv(runtimeVer, prof.BuildTime)
+	if fp.OS != "" {
+		switch strings.ToLower(fp.OS) {
+		case "linux":
+			env.Platform = "linux"
+		case "windows":
+			env.Platform = "win32"
+		case "macos", "darwin":
+			env.Platform = "darwin"
+		}
+	}
+	if fp.Arch != "" {
+		if fp.Arch == "x64" || fp.Arch == "x86_64" {
+			env.Arch = "x64"
+		} else {
+			env.Arch = fp.Arch
+		}
+	}
 	runner = telemetry.New(telemetry.DeviceIdentity{
 		ClientID:    fp.ClientID,
 		AccountUUID: acc.Extra.AccountUUID,
 		CLIVersion:  prof.CLIVersion,
 		UserAgent:   ua,
 		Entrypoint:  fp.Entrypoint,
-		Env:         telemetry.DefaultEnv(prof.Stainless["X-Stainless-Runtime-Version"], ""),
+		Env:         env,
 	}, geo.ProxyURL, &telemetry.HTTPTransport{
 		Client: &http.Client{Transport: SharedOrderedTransport(geo.ProxyURL), Timeout: 15 * time.Second},
 	})

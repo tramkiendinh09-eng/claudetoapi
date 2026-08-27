@@ -73,15 +73,19 @@ type HeaderBuildInput struct {
 	Token          string // OAuth access token
 	Beta           string // computed anthropic-beta value
 	Profile        *profile.Profile
-	UserAgent      string // fingerprint UA (may drift from profile via adoption)
-	SDKVersion     string // fingerprint SDK version
+	UserAgent      string // sticky per-account UA
+	SDKVersion     string // sticky per-account SDK version
+	OS             string // sticky X-Stainless-OS (empty → profile)
+	Arch           string // sticky X-Stainless-Arch (empty → profile)
+	Runtime        string // sticky X-Stainless-Runtime (empty → profile)
+	RuntimeVersion string // sticky X-Stainless-Runtime-Version (empty → profile)
 	SessionID      string // X-Claude-Code-Session-Id (stable per conversation)
 	ClientReqID    string // x-client-request-id (fresh UUID per request)
 	AcceptLanguage string // locale consistent with the exit IP's geography
-	Mimic          bool   // synthetic CLI headers (non-CC client)
+	Mimic          bool   // synthetic CLI headers; pool accounts always stamp these
 	DispatchV2S    bool   // anthropic-dispatch-id: v2s (gate-controlled)
 	IsStream       bool
-	ClientHeaders  http.Header // original client headers (passthrough for real CC)
+	ClientHeaders  http.Header // original client headers (legacy passthrough path)
 }
 
 // BuildUpstreamHeaders assembles the final header set.
@@ -97,15 +101,37 @@ func BuildUpstreamHeaders(in HeaderBuildInput) http.Header {
 		setHeaderRaw(h, "anthropic-dangerous-direct-browser-access", "true")
 		setHeaderRaw(h, "x-app", "cli")
 		setHeaderRaw(h, "User-Agent", in.UserAgent)
+		timeout := "600"
+		lang, os, arch, runtime, runtimeVer := "js", "Linux", "arm64", "node", "v24.3.0"
+		if in.Profile != nil {
+			timeout = in.Profile.TimeoutHeader
+			lang = in.Profile.Stainless["X-Stainless-Lang"]
+			os = in.Profile.Stainless["X-Stainless-OS"]
+			arch = in.Profile.Stainless["X-Stainless-Arch"]
+			runtime = in.Profile.Stainless["X-Stainless-Runtime"]
+			runtimeVer = in.Profile.Stainless["X-Stainless-Runtime-Version"]
+		}
+		if in.OS != "" {
+			os = in.OS
+		}
+		if in.Arch != "" {
+			arch = in.Arch
+		}
+		if in.Runtime != "" {
+			runtime = in.Runtime
+		}
+		if in.RuntimeVersion != "" {
+			runtimeVer = in.RuntimeVersion
+		}
 		for k, v := range map[string]string{
 			"X-Stainless-Retry-Count":     "0",
-			"X-Stainless-Timeout":         in.Profile.TimeoutHeader,
-			"X-Stainless-Lang":            in.Profile.Stainless["X-Stainless-Lang"],
+			"X-Stainless-Timeout":         timeout,
+			"X-Stainless-Lang":            lang,
 			"X-Stainless-Package-Version": in.SDKVersion,
-			"X-Stainless-OS":              in.Profile.Stainless["X-Stainless-OS"],
-			"X-Stainless-Arch":            in.Profile.Stainless["X-Stainless-Arch"],
-			"X-Stainless-Runtime":         in.Profile.Stainless["X-Stainless-Runtime"],
-			"X-Stainless-Runtime-Version": in.Profile.Stainless["X-Stainless-Runtime-Version"],
+			"X-Stainless-OS":              os,
+			"X-Stainless-Arch":            arch,
+			"X-Stainless-Runtime":         runtime,
+			"X-Stainless-Runtime-Version": runtimeVer,
 		} {
 			if v != "" {
 				setHeaderRaw(h, k, v)

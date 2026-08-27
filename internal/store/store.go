@@ -21,13 +21,21 @@ type Credentials struct {
 }
 
 // Fingerprint is the per-account persistent client identity.
+// One OAuth token must present exactly one machine: UA/SDK may ride a
+// one-way CLI version upgrade, but OS/arch/runtime stay sticky for the
+// life of the account. Inbound client UAs are never adopted onto this
+// record (that mix of passthrough + mimic is what got a pool token banned).
 type Fingerprint struct {
-	ClientID   string `json:"client_id"`              // 64-hex device id
-	Entrypoint string `json:"entrypoint"`             // cc_entrypoint persona
-	Profile    string `json:"profile"`                // CLI version profile name
-	UserAgent  string `json:"user_agent,omitempty"`   // adopted real-client UA (version drift)
-	SDKVersion string `json:"sdk_version,omitempty"`  // paired X-Stainless-Package-Version
-	UpdatedAt  int64  `json:"updated_at"`
+	ClientID       string `json:"client_id"`                  // 64-hex device id
+	Entrypoint     string `json:"entrypoint"`                 // cc_entrypoint persona
+	Profile        string `json:"profile"`                    // CLI version profile name
+	UserAgent      string `json:"user_agent,omitempty"`       // sticky outbound UA
+	SDKVersion     string `json:"sdk_version,omitempty"`      // paired X-Stainless-Package-Version
+	OS             string `json:"os,omitempty"`               // X-Stainless-OS, sticky
+	Arch           string `json:"arch,omitempty"`             // X-Stainless-Arch, sticky
+	Runtime        string `json:"runtime,omitempty"`          // X-Stainless-Runtime, sticky
+	RuntimeVersion string `json:"runtime_version,omitempty"`  // X-Stainless-Runtime-Version, sticky
+	UpdatedAt      int64  `json:"updated_at"`
 }
 
 // RateWindow is the last observed state of one unified rate-limit window

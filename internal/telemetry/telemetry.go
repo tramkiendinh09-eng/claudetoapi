@@ -113,7 +113,7 @@ func DefaultEnv(nodeVersion, buildTime string) EnvFingerprint {
 		nodeVersion = "v24.3.0"
 	}
 	if buildTime == "" {
-		buildTime = "2026-08-22T22:46:48Z" // 2.1.241 win32 build stamp
+		buildTime = "2026-08-26T05:55:19Z" // 2.1.247 native BUILD_TIME
 	}
 	return EnvFingerprint{
 		Platform:    "linux",

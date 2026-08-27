@@ -162,6 +162,33 @@ func TestNormalizeDateline(t *testing.T) {
 	}
 }
 
+func TestAlignBillingCLIVersion(t *testing.T) {
+	first := "hello world from claudetoapi!"
+	wantFP := ComputeVersionFingerprint(first, "2.1.247")
+	body := map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": first}},
+		"system": []any{
+			map[string]any{"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.246.abc; cc_entrypoint=cli;"},
+			map[string]any{"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."},
+		},
+	}
+	if !AlignBillingCLIVersion(body, "2.1.247") {
+		t.Fatal("expected billing rewrite")
+	}
+	got := body["system"].([]any)[0].(map[string]any)["text"].(string)
+	want := "x-anthropic-billing-header: cc_version=2.1.247." + wantFP + "; cc_entrypoint=cli;"
+	if got != want {
+		t.Fatalf("billing not aligned:\n got %s\nwant %s", got, want)
+	}
+	ident := body["system"].([]any)[1].(map[string]any)["text"].(string)
+	if ident != "You are Claude Code, Anthropic's official CLI for Claude." {
+		t.Fatal("non-billing system block must stay intact")
+	}
+	if AlignBillingCLIVersion(body, "2.1.247") {
+		t.Fatal("second align with same version must be a no-op")
+	}
+}
+
 func TestIsClaudeCodeClient(t *testing.T) {
 	body := map[string]any{
 		"metadata": map[string]any{"user_id": `{}`},

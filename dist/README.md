@@ -5,7 +5,7 @@
 本项目基于两份素材构建:
 
 - **sub2api**(LGPL-3.0)的公开行为模式——本项目为全新实现,未复制其代码;
-- **claude.exe 2.1.241 的本地逆向成果**——所有伪装参数以真实 CLI payload 为准(指纹 salt、beta 注册表、billing 归因块、默认值表)。
+- **claude.exe 2.1.247 的本地逆向成果**——所有伪装参数以真实 CLI payload 为准(指纹 salt、beta 注册表、billing 归因块、默认值表)。
 
 ## 相比 sub2api 修正的偏差(逆向验证)
 
@@ -14,7 +14,7 @@
 | 1 | `max_tokens` 缺省补 **32000**(不是 128000) | payload `P3b=32000, D3b=128000`,抓包实测 32000 |
 | 2 | **绝不注入** `temperature`(真实 CLI 不发送该字段) | 抓包无 temperature;payload 中仅出现于遥测 |
 | 3 | cache_control 用**裸 `{"type":"ephemeral"}`**(无 ttl;仅 1h 模式带 ttl) | 抓包 system 块无 ttl 字段 |
-| 4 | UA 与 SDK 版本**成对**:`claude-cli/2.1.241` ⇔ `X-Stainless-Package-Version: 0.208.0` | payload VERSION=2.1.241, packageVersion=0.208.0 |
+| 4 | UA 与 SDK 版本**成对**:`claude-cli/2.1.247` ⇔ `X-Stainless-Package-Version: 0.208.0` | payload VERSION=2.1.247, packageVersion=0.208.0 |
 | 5 | `effort-2025-11-24` 仅主线程携带;`extended-cache-ttl-2025-04-11` 仅 1h 缓存携带 | payload `KAE` / `re==="1h"` 条件推送 |
 | 6 | **haiku 主线程请求不带** `claude-code-20250219` | payload `G3b: if(!haiku)` |
 | 7 | billing 归因块带**请求链**:`cc_prev_req=req_*`(链上请求)+ `cc_prompt_id=<uuid>`(会话稳定) | payload 0x12445ab7 还原的完整字段序 |
@@ -30,7 +30,7 @@
 | TLS 指纹 | uTLS 复刻 Node.js 24.x ClientHello(JA3 `44f88fca…`,GREASE-ECH,http/1.1),HTTP/SOCKS5 隧道内保持 | `internal/tlsfp` |
 | **header 顺序** | **手写 HTTP/1.1 序列化器**:Go 标准库按字母序发 header,真实 CLI 是固定顺序——绕过标准库按 wire 顺序输出,带连接复用池(真实 CLI 也复用连接) | `internal/gw/ordered.go` |
 | header 大小写 | 每个 header 恢复抓包 wire casing(`X-Stainless-OS` 而非 `X-Stainless-Os`) | `internal/gw/headers.go` |
-| 版本配对 | UA `claude-cli/2.1.241` ⇔ SDK `0.208.0` 成对锁定,Profile 整体切换 | `internal/profile` |
+| 版本配对 | UA `claude-cli/2.1.247` ⇔ SDK `0.208.0` 成对锁定,Profile 整体切换 | `internal/profile` |
 | billing 链 | `cc_version` 指纹(salt + chars[4,7,20] + sha256 前缀)+ `cc_prev_req`(轮次链)+ `cc_prompt_id`(会话稳定 UUID) | `internal/mimicry/billing.go` |
 | entrypoint 联动 | `cli` / `sdk-cli` / `claude-vscode` 与 system prompt persona 变体对应 | `internal/mimicry/body.go` |
 | 条件 beta | haiku 主线程不带 claude-code beta;effort 仅主线程;extended-cache-ttl 仅 1h 缓存;redact 默认关 | `internal/mimicry/betas.go` |
@@ -38,7 +38,7 @@
 | 真实扩充块 | 默认加载 `data/expansion_prompt.txt`(已预装本地抓包的 27KB 真实块) | `internal/mimicry/body.go` |
 | 水印清洗 | 日期句隐写水印(4 撇号码点 × 2 分隔符)归一化,对真 CC 流量也生效 | `internal/mimicry/dateline.go` |
 | **地理一致性** | **代理池带时区/语言:绑定后 accept-language、提示词内日期自动对齐出口 IP 的时区与地区** | `internal/gw/gateway.go` |
-| 账号身份 | 每账号持久 ClientID/UA/entrypoint;UA 版本只升不降、偏移 >2 主版本拒收(防毒化) | `internal/gw/gateway.go` |
+| 账号身份 | 每账号一条 sticky 身份(UA/SDK/OS/Arch);池子号永远盖伪装头,不领养入站 UA;CLI 版本只随 profile 单向升级 | `internal/gw/gateway.go` |
 | 并发约束 | 每账号并发上限(默认 2,可调),贴近真实 CLI 1-3 并发会话 | `internal/gw/gateway.go` |
 | **遥测旁路** | **复刻 CLI 的第一方后台流量**:flag 配置拉取(GrowthBook remote-eval)+ 事件批量上报,让账号有正常"生活轨迹" | `internal/telemetry` |
 | 会话粘性 | 同对话固定同账号 + 同 `cc_prompt_id`,`cc_prev_req` 串成真实请求链 | `internal/gw/session.go` |

@@ -39,7 +39,7 @@ sudo journalctl -u claudetoapi -f   # 看日志
     { "name": "us1", "url": "http://u:p@ip:port",
       "timezone": "America/New_York", "language": "en-US,en;q=0.9" }
   ],
-  "profile": "2.1.241",           // 伪装 CLI 版本(与 SDK 版本成对锁定)
+  "profile": "2.1.247",           // 伪装 CLI 版本(与 SDK 版本成对锁定)
   "mimicry": {
     "default_entrypoint": "cli",  // cli / sdk-cli / claude-vscode
     "telemetry_bypass": true,     // 遥测旁路(默认开,建议保持)

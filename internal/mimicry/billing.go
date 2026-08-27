@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -161,6 +162,56 @@ func NewUUID() string {
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+var ccVersionRe = regexp.MustCompile(`cc_version=\d+\.\d+\.\d+\.[0-9a-fA-F]{3}`)
+
+// AlignBillingCLIVersion rewrites cc_version in a genuine CLI body so it
+// matches the account's sticky CLI version (fingerprint recomputed with
+// that version, matching payload fn Vzl). Used when real Claude Code
+// traffic is unified onto the pool identity instead of being passed
+// through with a foreign version.
+func AlignBillingCLIVersion(body map[string]any, cliVersion string) bool {
+	if body == nil || strings.TrimSpace(cliVersion) == "" {
+		return false
+	}
+	fp := ComputeVersionFingerprint(FirstUserText(body), cliVersion)
+	repl := "cc_version=" + cliVersion + "." + fp
+	changed := false
+	switch sys := body["system"].(type) {
+	case string:
+		if next, ok := rewriteBillingVersion(sys, repl); ok {
+			body["system"] = next
+			changed = true
+		}
+	case []any:
+		for i, b := range sys {
+			blk, ok := b.(map[string]any)
+			if !ok {
+				continue
+			}
+			t, _ := blk["text"].(string)
+			next, ok := rewriteBillingVersion(t, repl)
+			if !ok {
+				continue
+			}
+			blk["text"] = next
+			sys[i] = blk
+			changed = true
+		}
+	}
+	return changed
+}
+
+func rewriteBillingVersion(text, repl string) (string, bool) {
+	if !strings.Contains(text, "x-anthropic-billing-header:") || !strings.Contains(text, "cc_version=") {
+		return text, false
+	}
+	next := ccVersionRe.ReplaceAllString(text, repl)
+	if next == text {
+		return text, false
+	}
+	return next, true
 }
 
 // HasBillingBlock reports whether a decoded system array already carries a
