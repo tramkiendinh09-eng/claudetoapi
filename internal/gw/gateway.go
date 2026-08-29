@@ -41,10 +41,10 @@ type Gateway struct {
 	// slots enforces per-account concurrency caps.
 	slots sync.Map
 
-	// headerlessUntil is an in-memory, non-CC backoff for Anthropic 429s
-	// that carry no reset headers. Those are a third-party/API lane, not
-	// the 5h/7d quota: freezing the account store would also block working
-	// Claude Code traffic on the same OAuth token.
+	// headerlessUntil is an in-memory backoff for Anthropic 429s that
+	// carry no reset headers. Those are a non-stream / third-party lane,
+	// not the 5h/7d quota: freezing the account store would also block
+	// working Claude Code stream=true traffic on the same OAuth token.
 	headerlessMu    sync.Mutex
 	headerlessUntil map[int64]time.Time
 
@@ -621,7 +621,10 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 
 	// Per-account concurrency guard: real CLI processes run 1-3 parallel
 	// sessions; a pool account fanning out to dozens at once is a pattern.
-	if !opts.IsCC {
+	// Headerless 429s are a non-stream / third-party lane. Gate those
+	// requests in memory so a billing-block mimic (IsCC=true) cannot keep
+	// hammering; genuine stream=true Claude Code still uses the account.
+	if !opts.Stream || opts.CountTokens {
 		if until, ok := g.headerlessActive(acc.ID); ok {
 			d := time.Until(until)
 			if d < time.Second {

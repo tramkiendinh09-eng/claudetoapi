@@ -584,17 +584,45 @@ func TestHeaderless429DoesNotFreezeCC(t *testing.T) {
 	if after.RateLimitedUntil != nil && time.Until(*after.RateLimitedUntil) > 0 {
 		t.Fatal("headerless 429 must not freeze the account")
 	}
-	body := `{"model":"claude-sonnet-4-5-20250929","max_tokens":64,"messages":[{"role":"user","content":"hi"}],"metadata":{"user_id":"{\"device_id\":\"x\"}"}}`
+	body := `{"model":"claude-sonnet-4-5-20250929","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}],"metadata":{"user_id":"{\"device_id\":\"x\"}"}}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("User-Agent", "claude-cli/2.1.247 (external, cli)")
 	w2 := httptest.NewRecorder()
 	g.handleMessages(w2, req, false)
 	if w2.Code != 200 {
-		t.Fatalf("cc after headerless 429 want 200, got %d %s", w2.Code, w2.Body.String())
+		t.Fatalf("cc stream after headerless 429 want 200, got %d %s", w2.Code, w2.Body.String())
 	}
 	if calls != 2 {
-		t.Fatalf("cc must still hit upstream, calls=%d", calls)
+		t.Fatalf("cc stream must still hit upstream, calls=%d", calls)
+	}
+}
+
+func TestHeaderless429GatesCCNonstream(t *testing.T) {
+	calls := 0
+	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(429)
+		fmt.Fprint(w, `{"type":"error","error":{"type":"rate_limit_error"}}`)
+	}))
+	addAccount(t, st, "ccns")
+	body := `{"model":"claude-sonnet-4-5-20250929","max_tokens":64,"messages":[{"role":"user","content":"hi"}],"metadata":{"user_id":"{\"device_id\":\"x\"}"}}`
+	post := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+		req.Header.Set("content-type", "application/json")
+		req.Header.Set("User-Agent", "claude-cli/2.1.247 (external, cli)")
+		w := httptest.NewRecorder()
+		g.handleMessages(w, req, false)
+		return w
+	}
+	if w := post(); w.Code != 429 {
+		t.Fatalf("first cc nonstream want 429, got %d", w.Code)
+	}
+	if w := post(); w.Code != 429 {
+		t.Fatalf("cached cc nonstream want 429, got %d", w.Code)
+	}
+	if calls != 1 {
+		t.Fatalf("cc nonstream must not hammer after headerless 429, calls=%d", calls)
 	}
 }
 
