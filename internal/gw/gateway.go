@@ -24,6 +24,12 @@ import (
 
 const defaultUpstreamBase = "https://api.anthropic.com"
 
+// headerlessRetryWait is the pause between in-request retries of a
+// headerless 429. Tests set it to 0.
+var headerlessRetryWait = 8 * time.Second
+
+const headerlessRetryMax = 2
+
 // Gateway is the forwarding core.
 type Gateway struct {
 	cfg       *config.Config
@@ -619,20 +625,21 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 	ctx := r.Context()
 	start := time.Now()
 
-	// Per-account concurrency guard: real CLI processes run 1-3 parallel
-	// sessions; a pool account fanning out to dozens at once is a pattern.
-	// Headerless 429s are a non-stream / third-party lane. Gate those
-	// requests in memory so a billing-block mimic (IsCC=true) cannot keep
-	// hammering; genuine stream=true Claude Code still uses the account.
+	// Non-stream headerless 429s are a VS Code / agent-sdk lane. Do not
+	// bounce 429 at the client (that is the 20s retry storm). Wait out
+	// the in-memory gate, then send.
 	if !opts.Stream || opts.CountTokens {
 		if until, ok := g.headerlessActive(acc.ID); ok {
 			d := time.Until(until)
-			if d < time.Second {
-				d = time.Second
-			}
-			return false, &rateLimitEcho{
-				Decision: RateLimitDecision{Cooldown: d, Reason: "anthropic_429_headerless_cached"},
-				Body:     `{"type":"error","error":{"type":"rate_limit_error","message":"rate limited by upstream"}}`,
+			if d > 0 && headerlessRetryWait > 0 {
+				slog.Info("headerless_wait", "account_id", acc.ID, "wait_s", int(d.Seconds())+1)
+				timer := time.NewTimer(d)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return true, nil
+				case <-timer.C:
+				}
 			}
 		}
 	}
@@ -640,7 +647,12 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 	if !g.acquireSlot(acc) {
 		return false, nil
 	}
-	defer g.releaseSlot(acc)
+	heldSlot := true
+	defer func() {
+		if heldSlot {
+			g.releaseSlot(acc)
+		}
+	}()
 
 	token, err := g.accessToken(ctx, acc)
 	if err != nil {
@@ -730,6 +742,9 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 		// device id AND billing cc_version to the account's sticky CLI
 		// version so the same token never presents two releases at once.
 		mimicry.AlignBillingCLIVersion(body, prof.CLIVersion)
+		if !opts.Stream && fp.Entrypoint != "" {
+			mimicry.AlignBillingEntrypoint(body, fp.Entrypoint)
+		}
 		if fp.ClientID != "" {
 			sid := sessionUUID(SessionHash(body))
 			if sid == "" {
@@ -767,13 +782,16 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 	}
 
 	strippedThinking := false
+	headerlessTries := 0
 	var resp *http.Response
+	var lastPayload []byte
 	for {
 		payload, err := mimicry.EncodeBody(body)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "api_error", "encode body: "+err.Error())
 			return true, nil
 		}
+		lastPayload = payload
 		upstream, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(payload))
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "api_error", err.Error())
@@ -811,6 +829,37 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 				slog.Warn("thinking_signature_retry", "account_id", acc.ID, "account", acc.Name, "body", truncateStr(msg, 300))
 				_ = resp.Body.Close()
 				strippedThinking = true
+				continue
+			}
+		}
+		if resp.StatusCode == http.StatusTooManyRequests && !opts.CountTokens && headerlessTries < headerlessRetryMax {
+			now := time.Now()
+			decision := Parse429(resp.Header, now)
+			if decision.Window == "" && decision.Reason != "anthropic_429_retry_after" {
+				write429Shape(filepath.Join(g.cfg.AccountsDir, "last_429_shape.json"), body, opts, lastPayload, opts.ClientHeaders.Get("User-Agent"))
+				_ = resp.Body.Close()
+				headerlessTries++
+				slog.Warn("headerless_429_retry", "account_id", acc.ID, "n", headerlessTries, "wait_s", int(headerlessRetryWait.Seconds()),
+					"stream_sent", strings.Contains(string(lastPayload), `"stream":true`),
+					"keys", strings.Join(bodyKeys(body), ","),
+					"max_tokens", body["max_tokens"], "n_tools", lenAny(body["tools"]), "n_msgs", lenAny(body["messages"]))
+				if heldSlot {
+					g.releaseSlot(acc)
+					heldSlot = false
+				}
+				if headerlessRetryWait > 0 {
+					timer := time.NewTimer(headerlessRetryWait)
+					select {
+					case <-ctx.Done():
+						timer.Stop()
+						return true, nil
+					case <-timer.C:
+					}
+				}
+				if !g.acquireSlot(acc) {
+					return false, nil
+				}
+				heldSlot = true
 				continue
 			}
 		}
@@ -865,6 +914,7 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 
 	case resp.StatusCode == http.StatusTooManyRequests:
 		msg := peekErrBody(resp)
+		write429Shape(filepath.Join(g.cfg.AccountsDir, "last_429_shape.json"), body, opts, lastPayload, opts.ClientHeaders.Get("User-Agent"))
 		g.recordAttempt(acc, opts, resp.StatusCode, start, usageAcc{})
 		now := time.Now()
 		decision := Parse429(resp.Header, now)

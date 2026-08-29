@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,6 +15,11 @@ import (
 	"claudetoapi/internal/config"
 	"claudetoapi/internal/store"
 )
+
+func TestMain(m *testing.M) {
+	headerlessRetryWait = 0
+	os.Exit(m.Run())
+}
 
 // newTestGateway builds a gateway pointed at a fake upstream served by h.
 func newTestGateway(t *testing.T, h http.Handler) (*Gateway, *httptest.Server, *store.Store) {
@@ -545,22 +551,28 @@ func TestSingleAccount429Passthrough(t *testing.T) {
 	}
 }
 
-func TestHeaderless429GatesNonCC(t *testing.T) {
+func TestHeaderless429RetriesThenSucceeds(t *testing.T) {
 	calls := 0
 	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
-		w.WriteHeader(429)
-		fmt.Fprint(w, `{"type":"error","error":{"type":"rate_limit_error"}}`)
+		if calls <= headerlessRetryMax {
+			w.WriteHeader(429)
+			fmt.Fprint(w, `{"type":"error","error":{"type":"rate_limit_error"}}`)
+			return
+		}
+		w.Header().Set("content-type", "application/json")
+		fmt.Fprint(w, `{"id":"msg_ok","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`)
 	}))
-	addAccount(t, st, "only")
-	if w := postJSON(t, g, "/v1/messages"); w.Code != 429 {
-		t.Fatalf("first want 429, got %d", w.Code)
+	addAccount(t, st, "retry")
+	w := postJSON(t, g, "/v1/messages")
+	if w.Code != 200 {
+		t.Fatalf("want 200 after in-request retry, got %d %s", w.Code, w.Body.String())
 	}
-	if w := postJSON(t, g, "/v1/messages"); w.Code != 429 {
-		t.Fatalf("cached want 429, got %d", w.Code)
+	if calls != headerlessRetryMax+1 {
+		t.Fatalf("calls=%d want %d", calls, headerlessRetryMax+1)
 	}
-	if calls != 1 {
-		t.Fatalf("second non-cc must not hammer upstream, calls=%d", calls)
+	if !strings.Contains(w.Body.String(), `"ok"`) {
+		t.Fatalf("body %s", w.Body.String())
 	}
 }
 
@@ -568,7 +580,7 @@ func TestHeaderless429DoesNotFreezeCC(t *testing.T) {
 	calls := 0
 	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
-		if calls == 1 {
+		if calls <= headerlessRetryMax+1 {
 			w.WriteHeader(429)
 			fmt.Fprint(w, `{"type":"error","error":{"type":"rate_limit_error"}}`)
 			return
@@ -593,36 +605,8 @@ func TestHeaderless429DoesNotFreezeCC(t *testing.T) {
 	if w2.Code != 200 {
 		t.Fatalf("cc stream after headerless 429 want 200, got %d %s", w2.Code, w2.Body.String())
 	}
-	if calls != 2 {
+	if calls != headerlessRetryMax+2 {
 		t.Fatalf("cc stream must still hit upstream, calls=%d", calls)
-	}
-}
-
-func TestHeaderless429GatesCCNonstream(t *testing.T) {
-	calls := 0
-	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		w.WriteHeader(429)
-		fmt.Fprint(w, `{"type":"error","error":{"type":"rate_limit_error"}}`)
-	}))
-	addAccount(t, st, "ccns")
-	body := `{"model":"claude-sonnet-4-5-20250929","max_tokens":64,"messages":[{"role":"user","content":"hi"}],"metadata":{"user_id":"{\"device_id\":\"x\"}"}}`
-	post := func() *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
-		req.Header.Set("content-type", "application/json")
-		req.Header.Set("User-Agent", "claude-cli/2.1.247 (external, cli)")
-		w := httptest.NewRecorder()
-		g.handleMessages(w, req, false)
-		return w
-	}
-	if w := post(); w.Code != 429 {
-		t.Fatalf("first cc nonstream want 429, got %d", w.Code)
-	}
-	if w := post(); w.Code != 429 {
-		t.Fatalf("cached cc nonstream want 429, got %d", w.Code)
-	}
-	if calls != 1 {
-		t.Fatalf("cc nonstream must not hammer after headerless 429, calls=%d", calls)
 	}
 }
 

@@ -165,6 +165,7 @@ func NewUUID() string {
 }
 
 var ccVersionRe = regexp.MustCompile(`cc_version=\d+\.\d+\.\d+\.[0-9a-fA-F]{3}`)
+var ccEntrypointRe = regexp.MustCompile(`cc_entrypoint=[^;]*`)
 
 // AlignBillingCLIVersion rewrites cc_version in a genuine CLI body so it
 // matches the account's sticky CLI version (fingerprint recomputed with
@@ -208,6 +209,50 @@ func rewriteBillingVersion(text, repl string) (string, bool) {
 		return text, false
 	}
 	next := ccVersionRe.ReplaceAllString(text, repl)
+	if next == text {
+		return text, false
+	}
+	return next, true
+}
+
+// AlignBillingEntrypoint rewrites cc_entrypoint to the account's sticky
+// persona so a vscode/agent-sdk body is not paired with cli headers.
+func AlignBillingEntrypoint(body map[string]any, entrypoint string) bool {
+	if body == nil || strings.TrimSpace(entrypoint) == "" {
+		return false
+	}
+	repl := "cc_entrypoint=" + entrypoint
+	changed := false
+	switch sys := body["system"].(type) {
+	case string:
+		if next, ok := rewriteBillingEntrypoint(sys, repl); ok {
+			body["system"] = next
+			changed = true
+		}
+	case []any:
+		for i, b := range sys {
+			blk, ok := b.(map[string]any)
+			if !ok {
+				continue
+			}
+			t, _ := blk["text"].(string)
+			next, ok := rewriteBillingEntrypoint(t, repl)
+			if !ok {
+				continue
+			}
+			blk["text"] = next
+			sys[i] = blk
+			changed = true
+		}
+	}
+	return changed
+}
+
+func rewriteBillingEntrypoint(text, repl string) (string, bool) {
+	if !strings.Contains(text, "x-anthropic-billing-header:") || !strings.Contains(text, "cc_entrypoint=") {
+		return text, false
+	}
+	next := ccEntrypointRe.ReplaceAllString(text, repl)
 	if next == text {
 		return text, false
 	}

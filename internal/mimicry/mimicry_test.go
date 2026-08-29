@@ -247,6 +247,21 @@ func TestAlignBillingCLIVersion(t *testing.T) {
 	}
 }
 
+func TestAlignBillingEntrypoint(t *testing.T) {
+	body := map[string]any{
+		"system": []any{
+			map[string]any{"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.247.abc; cc_entrypoint=claude-vscode; cc_prompt_id=11111111-1111-4111-8111-111111111111;"},
+		},
+	}
+	if !AlignBillingEntrypoint(body, "cli") {
+		t.Fatal("expected entrypoint rewrite")
+	}
+	got := body["system"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(got, "cc_entrypoint=cli;") || strings.Contains(got, "claude-vscode") {
+		t.Fatalf("entrypoint not aligned: %s", got)
+	}
+}
+
 func TestIsClaudeCodeClient(t *testing.T) {
 	body := map[string]any{
 		"metadata": map[string]any{"user_id": `{}`},
