@@ -322,3 +322,27 @@ func TestStyleFor(t *testing.T) {
 		t.Fatal("ValidStyleKey matrix broken")
 	}
 }
+
+func TestTransformCountTokensStripsExtras(t *testing.T) {
+	body := map[string]any{
+		"model":       "claude-opus-5",
+		"max_tokens":  64,
+		"stream":      true,
+		"temperature": 0.2,
+		"messages":    []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+	Transform(body, TransformOptions{
+		Profile:     ProfileView{CLIVersion: "2.1.247", DefaultMaxTokens: 32000, MaxTokensUpper: 128000},
+		Persona:     PersonaCLI,
+		CountTokens: true,
+	})
+	if _, ok := body["max_tokens"]; ok {
+		t.Fatal("count_tokens must not forward max_tokens")
+	}
+	if _, ok := body["stream"]; ok {
+		t.Fatal("count_tokens must not forward stream")
+	}
+	if _, ok := body["temperature"]; ok {
+		t.Fatal("count_tokens must not forward temperature")
+	}
+}

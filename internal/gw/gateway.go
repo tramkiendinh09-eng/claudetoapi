@@ -481,22 +481,67 @@ func (g *Gateway) handleMessages(w http.ResponseWriter, r *http.Request, countTo
 
 	exclude := map[int64]bool{}
 	attempts := g.cfg.Mimicry.MaxAttempts
+	var lastRL *rateLimitEcho
 	for i := 0; i < attempts; i++ {
 		acc := g.pick(sessionHash, exclude)
 		if acc == nil {
-			g.writeOverloaded(w)
+			g.writeGiveUp(w, lastRL)
 			return
 		}
-		done := g.forwardOnce(w, r, acc, body, forwardOpts{
+		done, rl := g.forwardOnce(w, r, acc, body, forwardOpts{
 			IsCC: isCC, Stream: stream, Model: model, SessionHash: sessionHash, ClientHeaders: r.Header,
 			CountTokens: countTokens,
 		})
 		if done {
 			return
 		}
+		if rl != nil {
+			lastRL = rl
+		}
 		exclude[acc.ID] = true
 	}
+	g.writeGiveUp(w, lastRL)
+}
+
+// writeGiveUp is the no-account terminal: if the last attempt was a 429,
+// pass that 429 through (so clients back off) instead of translating it
+// into a 503 overloaded_error that they retry immediately.
+func (g *Gateway) writeGiveUp(w http.ResponseWriter, rl *rateLimitEcho) {
+	if rl != nil {
+		g.writeRateLimited(w, rl)
+		return
+	}
 	g.writeOverloaded(w)
+}
+
+type rateLimitEcho struct {
+	Decision RateLimitDecision
+	Body     string
+}
+
+func (g *Gateway) writeRateLimited(w http.ResponseWriter, rl *rateLimitEcho) {
+	secs := int64(rl.Decision.Cooldown.Seconds()) + 1
+	if secs < 1 {
+		secs = 1
+	}
+	if secs > 3600 {
+		secs = 3600
+	}
+	w.Header().Set("retry-after", strconv.FormatInt(secs, 10))
+	w.Header().Set("content-type", "application/json")
+	w.WriteHeader(http.StatusTooManyRequests)
+	body := strings.TrimSpace(rl.Body)
+	if body == "" {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"type": "error",
+			"error": map[string]any{
+				"type":    "rate_limit_error",
+				"message": "rate limited by upstream",
+			},
+		})
+		return
+	}
+	_, _ = io.WriteString(w, body)
 }
 
 // writeOverloaded reports upstream exhaustion with a Retry-After derived from
@@ -537,23 +582,24 @@ type forwardOpts struct {
 	CountTokens   bool
 }
 
-// forwardOnce sends the request through one account. It returns true when
-// the response has been fully handled (success or terminal error); false
-// when the caller should fail over to another account.
-func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store.Account, body map[string]any, opts forwardOpts) bool {
+// forwardOnce sends the request through one account. done=true means the
+// response has been fully handled (success or terminal error). A non-nil
+// rateLimitEcho on done=false lets the caller pass a 429 through when this
+// was the last account.
+func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store.Account, body map[string]any, opts forwardOpts) (done bool, rl *rateLimitEcho) {
 	ctx := r.Context()
 	start := time.Now()
 
 	// Per-account concurrency guard: real CLI processes run 1-3 parallel
 	// sessions; a pool account fanning out to dozens at once is a pattern.
 	if !g.acquireSlot(acc) {
-		return false
+		return false, nil
 	}
 	defer g.releaseSlot(acc)
 
 	token, err := g.accessToken(ctx, acc)
 	if err != nil {
-		return false // account unusable now; fail over
+		return false, nil // account unusable now; fail over
 	}
 
 	geo := g.geoFor(acc)
@@ -632,6 +678,7 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 			SessionID:   sessionID,
 			CacheTTL1h:  cacheTTLIs1h(body),
 			OutputStyle: accountStyle(acc, g.cfg.Mimicry.OutputStyle),
+			CountTokens: opts.CountTokens,
 		})
 	} else {
 		// Real CLI traffic: keep the client's system/tool stack, but pin
@@ -645,6 +692,21 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 			}
 			mimicry.RewriteUserIDOnly(body, fp.ClientID, acc.Extra.AccountUUID, sid)
 		}
+	}
+
+	if opts.CountTokens {
+		mimicry.StripCountTokensExtras(body)
+	}
+
+	// OAuth non-stream /v1/messages is its own RPM lane and 429s with no
+	// reset headers while stream=true on the same account returns 200.
+	// Promote stream=false generations to SSE upstream and fold back to JSON.
+	aggregateStream := false
+	upstreamStream := opts.Stream
+	if !opts.CountTokens && !opts.Stream {
+		body["stream"] = true
+		upstreamStream = true
+		aggregateStream = true
 	}
 
 	// count_tokens goes to its own endpoint (and never consumes a
@@ -665,12 +727,12 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 		payload, err := mimicry.EncodeBody(body)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "api_error", "encode body: "+err.Error())
-			return true
+			return true, nil
 		}
 		upstream, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(payload))
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "api_error", err.Error())
-			return true
+			return true, nil
 		}
 		upstream.Header = BuildUpstreamHeaders(HeaderBuildInput{
 			Token:          token,
@@ -690,13 +752,13 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 			// 2.1.241 Linux/arm64 mimic on the same token.
 			Mimic:         true,
 			DispatchV2S:   g.cfg.Mimicry.DispatchHeader,
-			IsStream:      opts.Stream,
+			IsStream:      upstreamStream,
 			ClientHeaders: opts.ClientHeaders,
 		})
 		resp, err = client.Do(upstream)
 		if err != nil {
 			slog.Warn("upstream_request_error", "account_id", acc.ID, "error", err.Error())
-			return false
+			return false, nil
 		}
 		if resp.StatusCode == http.StatusBadRequest && !strippedThinking && !opts.CountTokens {
 			msg := peekErrBody(resp)
@@ -733,7 +795,7 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 		_ = g.st.Update(acc.ID, func(a *store.Account) { a.Credentials.AccessToken = "" })
 		g.cooldown(acc.ID, 10*time.Minute, "oauth_401")
 		_ = resp.Body.Close()
-		return false
+		return false, nil
 
 	case resp.StatusCode == http.StatusForbidden:
 		msg := readErrBody(resp)
@@ -754,24 +816,36 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 			g.setError(acc.ID, "403 forbidden: "+msg)
 			slog.Error("account_403", "account_id", acc.ID, "body", msg)
 		}
-		return false
+		return false, nil
 
 	case resp.StatusCode == http.StatusTooManyRequests:
+		msg := peekErrBody(resp)
 		g.recordAttempt(acc, opts, resp.StatusCode, start, usageAcc{})
-		decision := Parse429(resp.Header, time.Now())
-		if mw, ok := ParseModelWindow(resp.Header, time.Now()); ok {
+		now := time.Now()
+		decision := Parse429(resp.Header, now)
+		fresh, _ := g.st.Get(acc.ID)
+		if fresh != nil {
+			decision = Enrich429FromAccount(decision, now, windowStat(fresh.RateWindow5h), windowStat(fresh.RateWindow7d))
+		}
+		slog.Warn("upstream_429",
+			"account_id", acc.ID, "reason", decision.Reason, "window", decision.Window,
+			"cooldown_s", int(decision.Cooldown.Seconds()),
+			"retry_after", resp.Header.Get("Retry-After"),
+			"count_tokens", opts.CountTokens, "promoted", aggregateStream)
+		if mw, ok := ParseModelWindow(resp.Header, now); ok {
 			slog.Warn("model_window_limited", "account_id", acc.ID, "window", mw.Window)
+		} else if opts.CountTokens {
+			slog.Warn("count_tokens_429_skip_cooldown", "account_id", acc.ID)
 		} else {
 			g.cooldown(acc.ID, decision.Cooldown, decision.Reason)
 		}
-		_ = resp.Body.Close()
-		return false
+		return false, &rateLimitEcho{Decision: decision, Body: msg}
 
 	case resp.StatusCode == 529 || resp.StatusCode >= 500:
 		g.recordAttempt(acc, opts, resp.StatusCode, start, usageAcc{})
 		slog.Warn("upstream_5xx", "account_id", acc.ID, "status", resp.StatusCode)
 		_ = resp.Body.Close()
-		return false
+		return false, nil
 
 	case resp.StatusCode >= 400:
 		msg := readErrBody(resp)
@@ -788,29 +862,44 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 		case ErrBilling:
 			g.cooldown(acc.ID, 6*time.Hour, "billing_exhausted: "+truncateStr(msg, 160))
 			slog.Warn("account_billing_exhausted", "account_id", acc.ID, "body", truncateStr(msg, 300))
-			return false
+			return false, nil
 		case ErrModelAccess:
 			slog.Warn("account_model_access", "account_id", acc.ID, "model", opts.Model, "body", truncateStr(msg, 300))
-			return false
+			return false, nil
 		}
 		copyHeaders(w, resp)
 		w.WriteHeader(resp.StatusCode)
 		_, _ = io.WriteString(w, msg)
-		return true
+		return true, nil
 	}
 
 	// Success path.
 	g.chain.Bind(opts.SessionHash, acc.ID)
-	copyHeaders(w, resp)
 	if opts.Stream {
+		copyHeaders(w, resp)
 		u := g.relaySSE(w, resp)
 		g.recordAttempt(acc, opts, resp.StatusCode, start, u)
+	} else if aggregateStream && isSSEResponse(resp) {
+		data, u, err := collectAnthropicSSE(resp.Body)
+		if err != nil {
+			slog.Warn("sse_aggregate_failed", "account_id", acc.ID, "error", err.Error())
+			g.recordAttempt(acc, opts, resp.StatusCode, start, u)
+			writeErr(w, http.StatusBadGateway, "api_error", "upstream stream aggregate failed: "+err.Error())
+			return true, nil
+		}
+		if rid := resp.Header.Get("request-id"); rid != "" {
+			w.Header().Set("request-id", rid)
+		}
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
+		g.recordAttempt(acc, opts, http.StatusOK, start, u)
 	} else {
+		copyHeaders(w, resp)
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(data)
 		if opts.CountTokens {
-			// count_tokens reports {"input_tokens":N} at the top level.
 			g.recordAttempt(acc, opts, resp.StatusCode, start, parseCountTokens(data))
 		} else {
 			g.recordAttempt(acc, opts, resp.StatusCode, start, parseFinalUsage(data))
@@ -823,7 +912,14 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 			g.telemetry.NotifyQuery(acc, opts.Model, opts.Stream, in, out, hasThinking(body))
 		}
 	}
-	return true
+	return true, nil
+}
+
+func windowStat(rw *store.RateWindow) *WindowStat {
+	if rw == nil {
+		return nil
+	}
+	return &WindowStat{Utilization: rw.Utilization, ResetAt: rw.ResetAt}
 }
 
 // recordAttempt writes one per-account request record; token fields stay zero

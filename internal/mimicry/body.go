@@ -90,6 +90,7 @@ type TransformOptions struct {
 	SessionID      string // stable per-conversation UUID
 	CacheTTL1h     bool
 	OutputStyle    string // "", "concise" or "proactive"
+	CountTokens    bool   // /v1/messages/count_tokens rejects max_tokens/stream
 }
 
 // ProfileView is the subset of profile.Profile the mimicry layer needs
@@ -242,6 +243,14 @@ func normalizeParams(body map[string]any, o TransformOptions) {
 		body["tools"] = []any{}
 	}
 
+	if o.CountTokens {
+		StripCountTokensExtras(body)
+		if tools, ok := body["tools"].([]any); ok && len(tools) == 0 {
+			delete(body, "tool_choice")
+		}
+		return
+	}
+
 	// max_tokens: CLI default 32000 (P3b), upper bound 128000 (D3b).
 	maxTokens := o.Profile.DefaultMaxTokens
 	if v, ok := body["max_tokens"]; ok {
@@ -290,6 +299,20 @@ func normalizeParams(body map[string]any, o TransformOptions) {
 	}
 
 	// No temperature injection: the 2.1.241 CLI does not send temperature.
+}
+
+// StripCountTokensExtras drops fields the count_tokens endpoint rejects
+// ("max_tokens: Extra inputs are not permitted").
+func StripCountTokensExtras(body map[string]any) {
+	if body == nil {
+		return
+	}
+	for _, k := range []string{
+		"max_tokens", "stream", "temperature", "top_p", "top_k",
+		"stop_sequences", "speed",
+	} {
+		delete(body, k)
+	}
 }
 
 func toInt(v any) (int, bool) {

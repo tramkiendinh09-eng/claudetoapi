@@ -486,3 +486,94 @@ func TestInvalidGrantDisablesInsteadOfCooldownLoop(t *testing.T) {
 		t.Fatal("invalid_grant must not cooldown-loop; the account is already in error state")
 	}
 }
+
+func TestNonstreamPromotesToStreamAndAggregates(t *testing.T) {
+	var gotStream bool
+	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		gotStream = strings.Contains(string(raw), `"stream":true`)
+		w.Header().Set("content-type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_p\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":3}}}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"message_stop\"}\n\n")
+	}))
+	addAccount(t, st, "p1")
+	w := postJSON(t, g, "/v1/messages")
+	if w.Code != 200 {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	if !gotStream {
+		t.Fatal("non-stream client request must be promoted to stream=true upstream")
+	}
+	if ct := w.Header().Get("content-type"); !strings.Contains(ct, "json") {
+		t.Fatalf("client still expects JSON, got %s", ct)
+	}
+	if !strings.Contains(w.Body.String(), `"ok"`) {
+		t.Fatalf("aggregated text missing: %s", w.Body.String())
+	}
+	rec := g.ledger.recordsFor(0, 10)[0]
+	if rec.Input != 3 || rec.Output != 1 {
+		t.Fatalf("ledger %+v", rec)
+	}
+}
+
+func TestSingleAccount429Passthrough(t *testing.T) {
+	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(429)
+		fmt.Fprint(w, `{"type":"error","error":{"type":"rate_limit_error","message":"rpm"}}`)
+	}))
+	addAccount(t, st, "only")
+	w := postJSON(t, g, "/v1/messages")
+	if w.Code != 429 {
+		t.Fatalf("want 429 passthrough, got %d %s", w.Code, w.Body.String())
+	}
+	if ra := w.Header().Get("Retry-After"); ra == "" {
+		t.Fatal("missing Retry-After")
+	} else if n := parseInt(ra); n < 30 || n > 31 {
+		t.Fatalf("Retry-After = %s, want ~30s fallback", ra)
+	}
+	if !strings.Contains(w.Body.String(), "rate_limit_error") {
+		t.Fatalf("body: %s", w.Body.String())
+	}
+	for _, a := range st.Snapshot() {
+		if a.RateLimitedUntil == nil || time.Until(*a.RateLimitedUntil) < 25*time.Second {
+			t.Fatalf("headerless 429 should cool ~30s, got %+v", a.RateLimitedUntil)
+		}
+	}
+}
+
+func TestCountTokensStripsMaxTokens(t *testing.T) {
+	var gotBody string
+	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		gotBody = string(raw)
+		fmt.Fprint(w, `{"input_tokens":99}`)
+	}))
+	addAccount(t, st, "c1")
+	w := postJSON(t, g, "/v1/messages/count_tokens")
+	if w.Code != 200 {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(gotBody, "max_tokens") || strings.Contains(gotBody, `"stream"`) {
+		t.Fatalf("count_tokens leaked extras: %s", gotBody)
+	}
+}
+
+func TestCountTokens429DoesNotCooldown(t *testing.T) {
+	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(429)
+		fmt.Fprint(w, `{"type":"error","error":{"type":"rate_limit_error"}}`)
+	}))
+	acc := addAccount(t, st, "ct")
+	w := postJSON(t, g, "/v1/messages/count_tokens")
+	if w.Code != 429 {
+		t.Fatalf("want 429, got %d %s", w.Code, w.Body.String())
+	}
+	after, _ := st.Get(acc.ID)
+	if after.RateLimitedUntil != nil && time.Until(*after.RateLimitedUntil) > 0 {
+		t.Fatalf("count_tokens 429 must not freeze generation: %+v", after.RateLimitedUntil)
+	}
+}
