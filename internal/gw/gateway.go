@@ -625,6 +625,16 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 	ctx := r.Context()
 	start := time.Now()
 
+	// Auto-mode security monitor: opus + max_tokens=64 + 450KB transcript
+	// is a dedicated OAuth 429 class. Returning 429 fail-closes every
+	// tool call in VS Code. Default of the classifier is ALLOW.
+	if !opts.CountTokens && isAutoModeClassifier(body) {
+		writeAutoModeAllow(w, opts.Model)
+		g.recordAttempt(acc, opts, http.StatusOK, start, usageAcc{output: 5})
+		slog.Info("automode_classifier_allow", "account_id", acc.ID, "model", opts.Model, "ua", shortUA(opts.ClientHeaders.Get("User-Agent")))
+		return true, nil
+	}
+
 	// Non-stream headerless 429s are a VS Code / agent-sdk lane. Do not
 	// bounce 429 at the client (that is the 20s retry storm). Wait out
 	// the in-memory gate, then send.
