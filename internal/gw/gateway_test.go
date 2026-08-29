@@ -539,9 +539,62 @@ func TestSingleAccount429Passthrough(t *testing.T) {
 		t.Fatalf("body: %s", w.Body.String())
 	}
 	for _, a := range st.Snapshot() {
-		if a.RateLimitedUntil == nil || time.Until(*a.RateLimitedUntil) < 25*time.Second {
-			t.Fatalf("headerless 429 should cool ~30s, got %+v", a.RateLimitedUntil)
+		if a.RateLimitedUntil != nil && time.Until(*a.RateLimitedUntil) > 0 {
+			t.Fatalf("headerless 429 must not freeze the account store: %+v", a.RateLimitedUntil)
 		}
+	}
+}
+
+func TestHeaderless429GatesNonCC(t *testing.T) {
+	calls := 0
+	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(429)
+		fmt.Fprint(w, `{"type":"error","error":{"type":"rate_limit_error"}}`)
+	}))
+	addAccount(t, st, "only")
+	if w := postJSON(t, g, "/v1/messages"); w.Code != 429 {
+		t.Fatalf("first want 429, got %d", w.Code)
+	}
+	if w := postJSON(t, g, "/v1/messages"); w.Code != 429 {
+		t.Fatalf("cached want 429, got %d", w.Code)
+	}
+	if calls != 1 {
+		t.Fatalf("second non-cc must not hammer upstream, calls=%d", calls)
+	}
+}
+
+func TestHeaderless429DoesNotFreezeCC(t *testing.T) {
+	calls := 0
+	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(429)
+			fmt.Fprint(w, `{"type":"error","error":{"type":"rate_limit_error"}}`)
+			return
+		}
+		w.Header().Set("content-type", "application/json")
+		fmt.Fprint(w, `{"id":"msg_cc","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	acc := addAccount(t, st, "mix")
+	if w := postJSON(t, g, "/v1/messages"); w.Code != 429 {
+		t.Fatalf("non-cc want 429, got %d", w.Code)
+	}
+	after, _ := st.Get(acc.ID)
+	if after.RateLimitedUntil != nil && time.Until(*after.RateLimitedUntil) > 0 {
+		t.Fatal("headerless 429 must not freeze the account")
+	}
+	body := `{"model":"claude-sonnet-4-5-20250929","max_tokens":64,"messages":[{"role":"user","content":"hi"}],"metadata":{"user_id":"{\"device_id\":\"x\"}"}}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	req.Header.Set("content-type", "application/json")
+	req.Header.Set("User-Agent", "claude-cli/2.1.247 (external, cli)")
+	w2 := httptest.NewRecorder()
+	g.handleMessages(w2, req, false)
+	if w2.Code != 200 {
+		t.Fatalf("cc after headerless 429 want 200, got %d %s", w2.Code, w2.Body.String())
+	}
+	if calls != 2 {
+		t.Fatalf("cc must still hit upstream, calls=%d", calls)
 	}
 }
 

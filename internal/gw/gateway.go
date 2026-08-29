@@ -41,6 +41,13 @@ type Gateway struct {
 	// slots enforces per-account concurrency caps.
 	slots sync.Map
 
+	// headerlessUntil is an in-memory, non-CC backoff for Anthropic 429s
+	// that carry no reset headers. Those are a third-party/API lane, not
+	// the 5h/7d quota: freezing the account store would also block working
+	// Claude Code traffic on the same OAuth token.
+	headerlessMu    sync.Mutex
+	headerlessUntil map[int64]time.Time
+
 	// ledger records per-account usage: today/total aggregates plus a
 	// per-request log with separate prompt-cache write/read counters.
 	ledger *usageLedger
@@ -57,7 +64,29 @@ func New(cfg *config.Config, st *store.Store) *Gateway {
 	g.ledger = newUsageLedger(filepath.Join(cfg.AccountsDir, "usage_history.json"))
 	g.ledger.startSaver()
 	g.tokenLock = map[int64]*sync.Mutex{}
+	g.headerlessUntil = map[int64]time.Time{}
 	return g
+}
+
+func (g *Gateway) noteHeaderless(id int64, d time.Duration) {
+	if d <= 0 {
+		d = fallback429Cooldown
+	}
+	until := time.Now().Add(d)
+	g.headerlessMu.Lock()
+	g.headerlessUntil[id] = until
+	g.headerlessMu.Unlock()
+	slog.Warn("headerless_429_lane", "account_id", id, "until", until.Format(time.RFC3339))
+}
+
+func (g *Gateway) headerlessActive(id int64) (time.Time, bool) {
+	g.headerlessMu.Lock()
+	defer g.headerlessMu.Unlock()
+	until, ok := g.headerlessUntil[id]
+	if !ok || !time.Now().Before(until) {
+		return time.Time{}, false
+	}
+	return until, true
 }
 
 // lockAccount takes the per-account token mutex.
@@ -592,6 +621,19 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 
 	// Per-account concurrency guard: real CLI processes run 1-3 parallel
 	// sessions; a pool account fanning out to dozens at once is a pattern.
+	if !opts.IsCC {
+		if until, ok := g.headerlessActive(acc.ID); ok {
+			d := time.Until(until)
+			if d < time.Second {
+				d = time.Second
+			}
+			return false, &rateLimitEcho{
+				Decision: RateLimitDecision{Cooldown: d, Reason: "anthropic_429_headerless_cached"},
+				Body:     `{"type":"error","error":{"type":"rate_limit_error","message":"rate limited by upstream"}}`,
+			}
+		}
+	}
+
 	if !g.acquireSlot(acc) {
 		return false, nil
 	}
@@ -831,13 +873,16 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 			"account_id", acc.ID, "reason", decision.Reason, "window", decision.Window,
 			"cooldown_s", int(decision.Cooldown.Seconds()),
 			"retry_after", resp.Header.Get("Retry-After"),
-			"count_tokens", opts.CountTokens, "promoted", aggregateStream)
+			"count_tokens", opts.CountTokens, "promoted", aggregateStream,
+			"cc", opts.IsCC, "body", truncateStr(msg, 300))
 		if mw, ok := ParseModelWindow(resp.Header, now); ok {
 			slog.Warn("model_window_limited", "account_id", acc.ID, "window", mw.Window)
 		} else if opts.CountTokens {
 			slog.Warn("count_tokens_429_skip_cooldown", "account_id", acc.ID)
-		} else {
+		} else if decision.Window != "" || decision.Reason == "anthropic_429_retry_after" || decision.Reason == "anthropic_requests_reset" || decision.Reason == "anthropic_unified_reset" {
 			g.cooldown(acc.ID, decision.Cooldown, decision.Reason)
+		} else {
+			g.noteHeaderless(acc.ID, decision.Cooldown)
 		}
 		return false, &rateLimitEcho{Decision: decision, Body: msg}
 
