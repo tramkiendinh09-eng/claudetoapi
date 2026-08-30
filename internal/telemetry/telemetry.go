@@ -107,7 +107,7 @@ func (e EnvFingerprint) BuildEnv(cliVersion string) map[string]any {
 }
 
 // DefaultEnv derives the env from the profile's Stainless identity:
-// Linux/arm64 runtime (matches our header fingerprint).
+// Linux/x64, matching @anthropic-ai/claude-code-linux-x64 on glibc VPS.
 func DefaultEnv(nodeVersion, buildTime string) EnvFingerprint {
 	if nodeVersion == "" {
 		nodeVersion = "v24.3.0"
@@ -117,7 +117,7 @@ func DefaultEnv(nodeVersion, buildTime string) EnvFingerprint {
 	}
 	return EnvFingerprint{
 		Platform:    "linux",
-		Arch:        "arm64",
+		Arch:        "x64",
 		NodeVersion: nodeVersion,
 		Terminal:    "xterm-256color",
 		Shell:       "bash",

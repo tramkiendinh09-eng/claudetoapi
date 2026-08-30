@@ -46,12 +46,12 @@ const (
 	BetaThinkingDisplay     = "thinking-display-updates-2026-08-18"
 )
 
-func stainlessNodeLinuxArm64(sdk string) map[string]string {
+func stainlessNodeLinux(sdk, arch string) map[string]string {
 	return map[string]string{
 		"X-Stainless-Lang":            "js",
 		"X-Stainless-Package-Version": sdk,
 		"X-Stainless-OS":              "Linux",
-		"X-Stainless-Arch":            "arm64",
+		"X-Stainless-Arch":            arch,
 		"X-Stainless-Runtime":         "node",
 		"X-Stainless-Runtime-Version": "v24.3.0",
 	}
@@ -65,24 +65,24 @@ var v2_1_241 = &Profile{
 	CLIVersion:       "2.1.241",
 	SDKVersion:       "0.208.0",
 	UserAgent:        "claude-cli/2.1.241 (external, cli)",
-	Stainless:        stainlessNodeLinuxArm64("0.208.0"),
+	Stainless:        stainlessNodeLinux("0.208.0", "arm64"),
 	BuildTime:        "2026-08-22T22:46:48Z",
 	DefaultMaxTokens: 32000,
 	MaxTokensUpper:   128000,
 	TimeoutHeader:    "600",
 }
 
-// v2_1_247 mirrors native claude-cli 2.1.247 (win32-x64 bun compile,
-// GIT_SHA 89c726188daf6407b6b57bf67d312f2958e5b9f2, 2026-08-26).
-// UA builder: `claude-cli/${VERSION} (external, ${ENTRYPOINT??"cli"})`.
-// Stainless SDK still reports runtime "node" even though the native binary
-// is Bun/1.4.1 (payload yc() node branch + process.version).
+// v2_1_247 mirrors native claude-cli 2.1.247. The npm optional package is
+// @anthropic-ai/claude-code-linux-x64 (os=linux, cpu=x64, libc=glibc) —
+// same Bun/1.4.1 payload as win32-x64, Stainless still reports runtime
+// "node". Default new identities use linux-x64 to match x86_64 VPS egress;
+// already-provisioned arm64 fingerprints stay sticky.
 var v2_1_247 = &Profile{
 	Name:             "2.1.247",
 	CLIVersion:       "2.1.247",
 	SDKVersion:       "0.208.0",
 	UserAgent:        "claude-cli/2.1.247 (external, cli)",
-	Stainless:        stainlessNodeLinuxArm64("0.208.0"),
+	Stainless:        stainlessNodeLinux("0.208.0", "x64"),
 	BuildTime:        "2026-08-26T05:55:19Z",
 	GitSHA:           "89c726188daf6407b6b57bf67d312f2958e5b9f2",
 	DefaultMaxTokens: 32000,

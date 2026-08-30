@@ -130,7 +130,7 @@ func TestEnvelopeMatchesGroundTruth(t *testing.T) {
 			t.Fatalf("env missing key %q", k)
 		}
 	}
-	if env["platform"] != "linux" || env["arch"] != "arm64" || env["version"] != "2.1.241" {
+	if env["platform"] != "linux" || env["arch"] != "x64" || env["version"] != "2.1.241" {
 		t.Fatalf("env mismatch: %v/%v/%v", env["platform"], env["arch"], env["version"])
 	}
 

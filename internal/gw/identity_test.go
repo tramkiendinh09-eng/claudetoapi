@@ -131,3 +131,52 @@ func TestPoolIdentityStampsFingerprintForGenuineCLI(t *testing.T) {
 		t.Fatalf("sdk = %q", gotSDK)
 	}
 }
+
+func TestNewAccountSeedsLinuxX64(t *testing.T) {
+	var gotOS, gotArch string
+	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotOS = r.Header.Get("X-Stainless-OS")
+		gotArch = r.Header.Get("X-Stainless-Arch")
+		w.Header().Set("content-type", "application/json")
+		fmt.Fprint(w, `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	addAccount(t, st, "fresh")
+	w := postJSON(t, g, "/v1/messages")
+	if w.Code != 200 {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	if gotOS != "Linux" || gotArch != "x64" {
+		t.Fatalf("new account stainless = %s/%s, want Linux/x64", gotOS, gotArch)
+	}
+	accs := st.Snapshot()
+	if len(accs) != 1 || accs[0].Fingerprint == nil {
+		t.Fatal("fingerprint not persisted")
+	}
+	if accs[0].Fingerprint.Arch != "x64" {
+		t.Fatalf("stored arch = %q", accs[0].Fingerprint.Arch)
+	}
+}
+
+func TestExistingArm64FingerprintNotReseededToX64(t *testing.T) {
+	var gotArch string
+	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotArch = r.Header.Get("X-Stainless-Arch")
+		w.Header().Set("content-type", "application/json")
+		fmt.Fprint(w, `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	acc := addAccount(t, st, "old")
+	_ = st.Update(acc.ID, func(a *store.Account) {
+		a.Fingerprint = &store.Fingerprint{
+			ClientID: strings.Repeat("ee", 32), Entrypoint: "cli", Profile: "2.1.247",
+			UserAgent: "claude-cli/2.1.247 (external, cli)", SDKVersion: "0.208.0",
+			OS: "Linux", Arch: "arm64", Runtime: "node", RuntimeVersion: "v24.3.0",
+		}
+	})
+	w := postJSON(t, g, "/v1/messages")
+	if w.Code != 200 {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	if gotArch != "arm64" {
+		t.Fatalf("existing arm64 account reseeded to %q", gotArch)
+	}
+}

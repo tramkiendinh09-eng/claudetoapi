@@ -102,7 +102,7 @@ func BuildUpstreamHeaders(in HeaderBuildInput) http.Header {
 		setHeaderRaw(h, "x-app", "cli")
 		setHeaderRaw(h, "User-Agent", in.UserAgent)
 		timeout := "600"
-		lang, os, arch, runtime, runtimeVer := "js", "Linux", "arm64", "node", "v24.3.0"
+		lang, os, arch, runtime, runtimeVer := "js", "Linux", "x64", "node", "v24.3.0"
 		if in.Profile != nil {
 			timeout = in.Profile.TimeoutHeader
 			lang = in.Profile.Stainless["X-Stainless-Lang"]
