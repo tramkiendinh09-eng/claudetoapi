@@ -200,7 +200,7 @@ func TestIsCCMismatchStripsThinkingAndAlignsIdentity(t *testing.T) {
 		if strings.Contains(gotBody, "cc_version=2.1.226") {
 			t.Fatal("mismatch must rewrite cc_version onto sticky CLI")
 		}
-		if !strings.Contains(gotBody, "cc_version=2.1.247.") {
+		if !strings.Contains(gotBody, "cc_version=2.1.251.") {
 			t.Fatal("sticky cc_version missing")
 		}
 		w.Header().Set("content-type", "application/json")
@@ -228,11 +228,11 @@ func TestIsCCMismatchStripsThinkingAndAlignsIdentity(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("calls=%d want 1", calls)
 	}
-	if gotUA != "claude-cli/2.1.247 (external, cli)" {
+	if gotUA != "claude-cli/2.1.251 (external, cli)" {
 		t.Fatalf("sticky UA lost: %s", gotUA)
 	}
 	if !strings.Contains(gotBeta, "thinking-display-updates-2026-08-18") {
-		t.Fatalf("sticky 2.1.247 must send display-updates: %s", gotBeta)
+		t.Fatalf("sticky 2.1.251 must send display-updates: %s", gotBeta)
 	}
 }
 
@@ -247,7 +247,7 @@ func TestIsCCMatchingKeepsThinkingSuffix(t *testing.T) {
 		if !strings.Contains(gotBody, `"type":"thinking"`) {
 			t.Fatal("matching CLI must keep signed thinking")
 		}
-		if !strings.Contains(gotBody, "cc_version=2.1.247.abc") {
+		if !strings.Contains(gotBody, "cc_version=2.1.251.abc") {
 			t.Fatal("matching CLI must keep cc_version suffix")
 		}
 		w.Header().Set("content-type", "application/json")
@@ -256,16 +256,16 @@ func TestIsCCMatchingKeepsThinkingSuffix(t *testing.T) {
 	acc := addAccount(t, st, "v247")
 	_ = st.Update(acc.ID, func(a *store.Account) {
 		a.Fingerprint = &store.Fingerprint{
-			ClientID: strings.Repeat("ab", 32), Entrypoint: "cli", Profile: "2.1.247",
-			UserAgent: "claude-cli/2.1.247 (external, cli)", SDKVersion: "0.208.0",
+			ClientID: strings.Repeat("ab", 32), Entrypoint: "cli", Profile: "2.1.251",
+			UserAgent: "claude-cli/2.1.251 (external, cli)", SDKVersion: "0.208.0",
 			OS: "Linux", Arch: "arm64", Runtime: "node", RuntimeVersion: "v24.3.0",
 			UpdatedAt: time.Now().Unix(),
 		}
 	})
-	body := `{"model":"claude-opus-5","max_tokens":64,"thinking":{"type":"enabled","budget_tokens":32},"messages":[{"role":"user","content":"hello world from claudetoapi!"},{"role":"assistant","content":[{"type":"thinking","thinking":"plan","signature":"deadbeef"},{"type":"text","text":"done"}]},{"role":"user","content":"next"}],"metadata":{"user_id":"{\"device_id\":\"x\"}"},"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.247.abc; cc_entrypoint=cli;"}]}`
+	body := `{"model":"claude-opus-5","max_tokens":64,"thinking":{"type":"enabled","budget_tokens":32},"messages":[{"role":"user","content":"hello world from claudetoapi!"},{"role":"assistant","content":[{"type":"thinking","thinking":"plan","signature":"deadbeef"},{"type":"text","text":"done"}]},{"role":"user","content":"next"}],"metadata":{"user_id":"{\"device_id\":\"x\"}"},"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.251.abc; cc_entrypoint=cli;"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
 	req.Header.Set("content-type", "application/json")
-	req.Header.Set("User-Agent", "claude-cli/2.1.247 (external, cli)")
+	req.Header.Set("User-Agent", "claude-cli/2.1.251 (external, cli)")
 	req.Header.Set("anthropic-beta", "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-display-updates-2026-08-18,task-budgets-2026-03-13")
 	w := httptest.NewRecorder()
 	g.handleMessages(w, req, false)

@@ -4,12 +4,12 @@
 // CLI release pins together: the UA version, the bundled @anthropic-ai/sdk
 // version (X-Stainless-Package-Version), default max_tokens and the beta
 // header vocabulary. Real CLI releases lock these values in pairs — e.g.
-// claude-cli/2.1.247 bundles SDK 0.208.0 — so a gateway that mixes versions
+// claude-cli/2.1.251 bundles SDK 0.208.0 — so a gateway that mixes versions
 // from different releases produces client identities that never existed in
-// the wild (verified against the local claude.exe 2.1.247 reverse-engineered
-// payload: VERSION="2.1.247", packageVersion "0.208.0", BUILD_TIME
-// 2026-08-26T05:55:19Z, native runtime Bun/1.4.1 with Stainless still
-// reporting runtime "node").
+// the wild (verified against local claude.exe 2.1.251: VERSION="2.1.251",
+// packageVersion "0.208.0", BUILD_TIME 2026-08-28T14:51:38Z, GIT_SHA
+// 37534ac596d80cefb02d272f036adba4ba055d2c, native Bun/1.4.1 with Stainless
+// still reporting runtime "node").
 package profile
 
 import "time"
@@ -90,14 +90,31 @@ var v2_1_247 = &Profile{
 	TimeoutHeader:    "600",
 }
 
+// v2_1_251 mirrors native claude-cli 2.1.251 (win32-x64 + linux-x64 bun
+// compile, same JS payload). SDK still 0.208.0; thinking-display-updates
+// and Vzl salt 59cf53e54c78 are unchanged from 2.1.247.
+var v2_1_251 = &Profile{
+	Name:             "2.1.251",
+	CLIVersion:       "2.1.251",
+	SDKVersion:       "0.208.0",
+	UserAgent:        "claude-cli/2.1.251 (external, cli)",
+	Stainless:        stainlessNodeLinux("0.208.0", "x64"),
+	BuildTime:        "2026-08-28T14:51:38Z",
+	GitSHA:           "37534ac596d80cefb02d272f036adba4ba055d2c",
+	DefaultMaxTokens: 32000,
+	MaxTokensUpper:   128000,
+	TimeoutHeader:    "600",
+}
+
 // Registry of known profiles; Default is used for new identities and for
 // one-way version upgrades of existing fingerprints.
 var (
 	Registry = map[string]*Profile{
 		v2_1_241.Name: v2_1_241,
 		v2_1_247.Name: v2_1_247,
+		v2_1_251.Name: v2_1_251,
 	}
-	Default = v2_1_247
+	Default = v2_1_251
 )
 
 // Lookup returns a named profile, or Default when the name is unknown/empty.
@@ -122,7 +139,7 @@ type Model struct {
 	DisplayName string `json:"display_name"`
 }
 
-// DefaultModels mirrors the CLI's advertised model set (2.1.247 registry).
+// DefaultModels mirrors the CLI's advertised model set (2.1.251 registry).
 var DefaultModels = []Model{
 	{ID: "claude-fable-5", Type: "model", DisplayName: "Claude Fable 5"},
 	{ID: "claude-mythos-5", Type: "model", DisplayName: "Claude Mythos 5"},

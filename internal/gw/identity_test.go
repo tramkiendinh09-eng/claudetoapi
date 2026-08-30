@@ -47,9 +47,12 @@ func TestVersionTripleOfficialSuffix(t *testing.T) {
 	if !newerVersion("claude-cli/2.1.247 (external, cli)", "claude-cli/2.1.241 (external, cli)") {
 		t.Fatal("2.1.247 must be newer than 2.1.241")
 	}
+	if !newerVersion("claude-cli/2.1.251 (external, cli)", "claude-cli/2.1.247 (external, cli)") {
+		t.Fatal("2.1.251 must be newer than 2.1.247")
+	}
 }
 
-func TestFingerprintIgnoresInboundUAAndFreezesProfile(t *testing.T) {
+func TestFingerprintIgnoresInboundUAAndUpgradesCLIVersion(t *testing.T) {
 	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
 		fmt.Fprint(w, `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
@@ -61,6 +64,10 @@ func TestFingerprintIgnoresInboundUAAndFreezesProfile(t *testing.T) {
 		Profile:    "2.1.241",
 		UserAgent:  "claude-cli/2.1.241 (external, cli)",
 		SDKVersion: "0.208.0",
+		OS:         "Linux",
+		Arch:       "arm64",
+		Runtime:    "node",
+		RuntimeVersion: "v24.3.0",
 		UpdatedAt:  time.Now().Add(-time.Hour).Unix(),
 	}
 	if err := st.Update(acc.ID, func(a *store.Account) { a.Fingerprint = old }); err != nil {
@@ -69,11 +76,11 @@ func TestFingerprintIgnoresInboundUAAndFreezesProfile(t *testing.T) {
 	acc, _ = st.Get(acc.ID)
 
 	fp, prof := g.resolveFingerprint(acc, "claude-cli/2.1.246 (external, cli)")
-	if prof.CLIVersion != "2.1.241" {
-		t.Fatalf("frozen profile = %s", prof.CLIVersion)
+	if prof.CLIVersion != "2.1.251" {
+		t.Fatalf("upgraded profile = %s", prof.CLIVersion)
 	}
-	if fp.UserAgent != "claude-cli/2.1.241 (external, cli)" {
-		t.Fatalf("sticky UA mutated, got %q", fp.UserAgent)
+	if fp.UserAgent != "claude-cli/2.1.251 (external, cli)" {
+		t.Fatalf("sticky UA not upgraded, got %q", fp.UserAgent)
 	}
 	if strings.Contains(fp.UserAgent, "2.1.246") {
 		t.Fatal("inbound 2.1.246 must not be adopted")
@@ -83,7 +90,7 @@ func TestFingerprintIgnoresInboundUAAndFreezesProfile(t *testing.T) {
 	}
 
 	fp2, _ := g.resolveFingerprint(acc, "Go-http-client/2.0")
-	if fp2.UserAgent != "claude-cli/2.1.241 (external, cli)" {
+	if fp2.UserAgent != "claude-cli/2.1.251 (external, cli)" {
 		t.Fatalf("sticky UA drifted to %q", fp2.UserAgent)
 	}
 }
@@ -101,11 +108,15 @@ func TestPoolIdentityStampsFingerprintForGenuineCLI(t *testing.T) {
 	acc := addAccount(t, st, "pool")
 	_ = st.Update(acc.ID, func(a *store.Account) {
 		a.Fingerprint = &store.Fingerprint{
-			ClientID:   strings.Repeat("cd", 32),
-			Entrypoint: "cli",
-			Profile:    "2.1.241",
-			UserAgent:  "claude-cli/2.1.241 (external, cli)",
-			SDKVersion: "0.208.0",
+			ClientID:       strings.Repeat("cd", 32),
+			Entrypoint:     "cli",
+			Profile:        "2.1.241",
+			UserAgent:      "claude-cli/2.1.241 (external, cli)",
+			SDKVersion:     "0.208.0",
+			OS:             "Linux",
+			Arch:           "arm64",
+			Runtime:        "node",
+			RuntimeVersion: "v24.3.0",
 		}
 	})
 
@@ -121,8 +132,8 @@ func TestPoolIdentityStampsFingerprintForGenuineCLI(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("status %d: %s", w.Code, w.Body.String())
 	}
-	if gotUA != "claude-cli/2.1.241 (external, cli)" {
-		t.Fatalf("upstream UA = %q, want frozen sticky 2.1.241", gotUA)
+	if gotUA != "claude-cli/2.1.251 (external, cli)" {
+		t.Fatalf("upstream UA = %q, want upgraded sticky 2.1.251", gotUA)
 	}
 	if gotOS != "Linux" || gotArch != "arm64" {
 		t.Fatalf("upstream stainless = %s/%s (inbound Windows/x64 must not leak)", gotOS, gotArch)
@@ -178,5 +189,12 @@ func TestExistingArm64FingerprintNotReseededToX64(t *testing.T) {
 	}
 	if gotArch != "arm64" {
 		t.Fatalf("existing arm64 account reseeded to %q", gotArch)
+	}
+	fresh, _ := st.Get(acc.ID)
+	if fresh.Fingerprint.UserAgent != "claude-cli/2.1.251 (external, cli)" {
+		t.Fatalf("UA not one-way upgraded: %q", fresh.Fingerprint.UserAgent)
+	}
+	if fresh.Fingerprint.Arch != "arm64" {
+		t.Fatalf("arch jumped: %q", fresh.Fingerprint.Arch)
 	}
 }

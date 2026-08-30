@@ -20,7 +20,7 @@
       "language": "ja-JP,ja;q=0.9,en-US;q=0.8"
     }
   ],
-  "profile": "2.1.247",
+  "profile": "2.1.251",
   "max_body_mb": 32,
   "mimicry": {
     "default_entrypoint": "cli",

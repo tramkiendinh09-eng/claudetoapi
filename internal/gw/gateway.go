@@ -342,30 +342,43 @@ func olderUsed(acc, best *store.Account) bool {
 // resolveFingerprint returns the per-account identity, creating it lazily.
 // Inbound client UAs are never adopted onto a pool OAuth account — the same
 // token presenting 2.1.246 Windows passthrough and 2.1.241 Linux/arm64 mimic
-// is what got an account banned. The stored fingerprint is frozen: a live
-// token must not jump CLI versions just because Default moved.
+// is what got an account banned. CLI version may ride a one-way upgrade to
+// the configured profile (like a real user updating claude); OS/arch/runtime
+// stay sticky.
 func (g *Gateway) resolveFingerprint(acc *store.Account, clientUA string) (fp *store.Fingerprint, prof *profile.Profile) {
+	target := profile.Lookup(g.cfg.ProfileName)
 	if acc.Fingerprint != nil && acc.Fingerprint.ClientID != "" {
 		fp = acc.Fingerprint
-		prof = profileFromFingerprint(fp, profile.Lookup(g.cfg.ProfileName))
-		if inbound := strings.TrimSpace(clientUA); inbound != "" && inbound != orDefault(fp.UserAgent, prof.UserAgent) {
+		if inbound := strings.TrimSpace(clientUA); inbound != "" && inbound != orDefault(fp.UserAgent, target.UserAgent) {
 			slog.Debug("identity_unify_ignore_inbound_ua",
 				"account_id", acc.ID,
 				"inbound", shortUA(inbound),
-				"sticky", shortUA(orDefault(fp.UserAgent, prof.UserAgent)))
+				"sticky", shortUA(orDefault(fp.UserAgent, target.UserAgent)))
 		}
+		upgraded := upgradeFingerprint(fp, target)
 		missingPlatform := fp.OS == "" || fp.Arch == "" || fp.Runtime == "" || fp.RuntimeVersion == ""
+		if upgraded != nil {
+			fp.UserAgent = upgraded.UserAgent
+			fp.SDKVersion = upgraded.SDKVersion
+			fp.Profile = upgraded.Profile
+			fp.UpdatedAt = upgraded.UpdatedAt
+		}
+		prof = profileFromFingerprint(fp, target)
 		seedStickyPlatform(fp, prof)
-		if missingPlatform {
+		if upgraded != nil || missingPlatform {
 			snap := *fp
 			_ = g.st.Update(acc.ID, func(a *store.Account) {
 				if a.Fingerprint == nil {
 					return
 				}
+				a.Fingerprint.UserAgent = snap.UserAgent
+				a.Fingerprint.SDKVersion = snap.SDKVersion
+				a.Fingerprint.Profile = snap.Profile
 				a.Fingerprint.OS = snap.OS
 				a.Fingerprint.Arch = snap.Arch
 				a.Fingerprint.Runtime = snap.Runtime
 				a.Fingerprint.RuntimeVersion = snap.RuntimeVersion
+				a.Fingerprint.UpdatedAt = snap.UpdatedAt
 			})
 		}
 		return fp, prof
