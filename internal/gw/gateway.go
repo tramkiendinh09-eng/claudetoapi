@@ -705,7 +705,14 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 		FastMode:        fastMode,
 	})
 	if in := opts.ClientHeaders.Get("anthropic-beta"); in != "" {
-		beta = mimicry.MergeBetas(beta, in)
+		if opts.IsCC {
+			// Real CLI: the inbound list is what signed historical thinking.
+			// MergeBetas would UNION computed 2.1.247 extras onto a 2.1.226
+			// request and 400 the next turn.
+			beta = mimicry.FreezeBetas(in, beta)
+		} else {
+			beta = mimicry.MergeBetas(beta, in)
+		}
 	}
 	// First turn of a conversation: emit the input_prompt telemetry marker
 	// (carries the chain's cc_prompt_id, exactly like the captured stream).
@@ -748,25 +755,10 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 			CountTokens: opts.CountTokens,
 		})
 	} else {
-		// Real CLI traffic: keep the client's system/tool stack, but pin
-		// device id AND billing cc_version to the account's sticky CLI
-		// version so the same token never presents two releases at once.
-		mimicry.AlignBillingCLIVersion(body, prof.CLIVersion)
-		// Billing is pinned to the sticky CLI version. History signed under
-		// a different client release (2.1.226 vs sticky 2.1.247) 400s on
-		// the first hop. Strip thinking before send so Anthropic never
-		// sees the signature mismatch.
-		stickyUA := orDefault(fp.UserAgent, prof.UserAgent)
-		inUA := opts.ClientHeaders.Get("User-Agent")
-		if mimicry.HasSignedThinking(body) && cliVersionMismatch(inUA, stickyUA) {
-			if mimicry.StripThinkingBlocks(body) {
-				slog.Warn("thinking_strip_cli_version_mismatch",
-					"account_id", acc.ID, "inbound", shortUA(inUA), "sticky", shortUA(stickyUA))
-			}
-		}
-		if !opts.Stream && fp.Entrypoint != "" {
-			mimicry.AlignBillingEntrypoint(body, fp.Entrypoint)
-		}
+		// Real CLI traffic: sticky identity is headers + metadata.user_id
+		// only. cc_version / cc_entrypoint / extra anthropic-beta tokens are
+		// signature-bound; rewriting a 2.1.226 body onto a 2.1.247 sticky
+		// profile 400s "Invalid signature in thinking block" every turn.
 		if fp.ClientID != "" {
 			sid := sessionUUID(SessionHash(body))
 			if sid == "" {

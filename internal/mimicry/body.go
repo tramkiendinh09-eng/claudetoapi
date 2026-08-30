@@ -309,7 +309,7 @@ func StripCountTokensExtras(body map[string]any) {
 	}
 	for _, k := range []string{
 		"max_tokens", "stream", "temperature", "top_p", "top_k",
-		"stop_sequences", "speed",
+		"stop_sequences", "speed", "metadata",
 	} {
 		delete(body, k)
 	}

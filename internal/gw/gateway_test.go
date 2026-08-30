@@ -185,13 +185,20 @@ func TestThinkingSignatureRetryStripsBlocks(t *testing.T) {
 	}
 }
 
-func TestVersionMismatchStripsThinkingBeforeSend(t *testing.T) {
+func TestIsCCFreezesSignatureSurface(t *testing.T) {
 	calls := 0
+	var gotBody, gotBeta, gotUA string
 	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
 		raw, _ := io.ReadAll(r.Body)
-		if strings.Contains(string(raw), `"type":"thinking"`) {
-			t.Fatal("version mismatch must strip thinking before first hop")
+		gotBody = string(raw)
+		gotBeta = r.Header.Get("anthropic-beta")
+		gotUA = r.Header.Get("User-Agent")
+		if !strings.Contains(gotBody, `"type":"thinking"`) {
+			t.Fatal("signed thinking must ride the first hop")
+		}
+		if !strings.Contains(gotBody, "cc_version=2.1.226.abc") {
+			t.Fatal("IsCC must not rewrite inbound cc_version")
 		}
 		w.Header().Set("content-type", "application/json")
 		fmt.Fprint(w, `{"id":"msg_1","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`)
@@ -209,6 +216,7 @@ func TestVersionMismatchStripsThinkingBeforeSend(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("User-Agent", "claude-cli/2.1.226 (external, cli)")
+	req.Header.Set("anthropic-beta", "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14")
 	w := httptest.NewRecorder()
 	g.handleMessages(w, req, false)
 	if w.Code != 200 {
@@ -216,6 +224,42 @@ func TestVersionMismatchStripsThinkingBeforeSend(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("calls=%d want 1", calls)
+	}
+	if gotUA != "claude-cli/2.1.247 (external, cli)" {
+		t.Fatalf("sticky UA lost: %s", gotUA)
+	}
+	if strings.Contains(gotBeta, "thinking-display-updates") {
+		t.Fatalf("must not inject display-updates onto 2.1.226 inbound: %s", gotBeta)
+	}
+}
+
+func TestCountTokensStripsMetadata(t *testing.T) {
+	var gotBody string
+	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		gotBody = string(raw)
+		fmt.Fprint(w, `{"input_tokens":99}`)
+	}))
+	acc := addAccount(t, st, "ct-meta")
+	_ = st.Update(acc.ID, func(a *store.Account) {
+		a.Fingerprint = &store.Fingerprint{
+			ClientID: strings.Repeat("ab", 32), Entrypoint: "cli", Profile: "2.1.247",
+			UserAgent: "claude-cli/2.1.247 (external, cli)", SDKVersion: "0.208.0",
+			OS: "Linux", Arch: "arm64", Runtime: "node", RuntimeVersion: "v24.3.0",
+			UpdatedAt: time.Now().Unix(),
+		}
+	})
+	body := `{"model":"claude-opus-5","max_tokens":64,"messages":[{"role":"user","content":"hi"}],"metadata":{"user_id":"{\"device_id\":\"x\"}"}}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", strings.NewReader(body))
+	req.Header.Set("content-type", "application/json")
+	req.Header.Set("User-Agent", "claude-cli/2.1.226 (external, cli)")
+	w := httptest.NewRecorder()
+	g.handleMessages(w, req, true)
+	if w.Code != 200 {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(gotBody, `"metadata"`) || strings.Contains(gotBody, "max_tokens") {
+		t.Fatalf("count_tokens leaked extras: %s", gotBody)
 	}
 }
 
@@ -680,7 +724,7 @@ func TestCountTokensStripsMaxTokens(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
-	if strings.Contains(gotBody, "max_tokens") || strings.Contains(gotBody, `"stream"`) {
+	if strings.Contains(gotBody, "max_tokens") || strings.Contains(gotBody, `"stream"`) || strings.Contains(gotBody, `"metadata"`) {
 		t.Fatalf("count_tokens leaked extras: %s", gotBody)
 	}
 }

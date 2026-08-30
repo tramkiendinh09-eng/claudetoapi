@@ -72,6 +72,31 @@ func ComputeBetas(model string, o BetaOptions) string {
 	return strings.Join(dedupe(betas), ",")
 }
 
+// FreezeBetas uses the inbound anthropic-beta list as the signature surface
+// for genuine Claude Code traffic. Capability tokens the client omitted
+// (notably thinking-display-updates-2026-08-18, which only 2.1.247+ pushes)
+// must not be injected: Anthropic binds thinking signatures to the exact
+// beta set, and an extra token 400s "Invalid signature in thinking block".
+// Garbage tokens are dropped. Empty/junk inbound falls back to computed.
+func FreezeBetas(inbound, fallback string) string {
+	var out []string
+	seen := make(map[string]struct{}, 16)
+	for _, t := range splitBetas(inbound) {
+		if !looksLikeBeta(t) {
+			continue
+		}
+		if _, ok := seen[t]; ok {
+			continue
+		}
+		seen[t] = struct{}{}
+		out = append(out, t)
+	}
+	if len(out) == 0 {
+		return fallback
+	}
+	return strings.Join(out, ",")
+}
+
 // MergeBetas unions the computed CLI beta list with inbound anthropic-beta
 // tokens. Identity/capability we always emit stay first; extra tokens the
 // real CLI already used to sign thinking blocks are appended. Garbage and

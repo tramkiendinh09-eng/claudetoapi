@@ -80,6 +80,23 @@ func TestComputeBetasP0Rules(t *testing.T) {
 	}
 }
 
+func TestFreezeBetasKeepsInboundOmitsComputedExtras(t *testing.T) {
+	computed := ComputeBetas("claude-opus-5", BetaOptions{ThinkingEnabled: true})
+	if !strings.Contains(computed, "thinking-display-updates-2026-08-18") {
+		t.Fatalf("computed must still carry display-updates for mimic: %s", computed)
+	}
+	got := FreezeBetas("claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14", computed)
+	if strings.Contains(got, "thinking-display-updates") {
+		t.Fatalf("FreezeBetas must not inject display-updates the client omitted: %s", got)
+	}
+	if !strings.Contains(got, "claude-code-20250219") || !strings.Contains(got, "oauth-2025-04-20") {
+		t.Fatalf("identity betas dropped: %s", got)
+	}
+	if fallback := FreezeBetas("garbage SPACE", computed); fallback != computed {
+		t.Fatalf("junk inbound must fall back to computed, got %s", fallback)
+	}
+}
+
 func TestMergeBetasKeepsCLIExtras(t *testing.T) {
 	base := ComputeBetas("claude-opus-5", BetaOptions{ThinkingEnabled: true})
 	got := MergeBetas(base, "claude-code-20250219,thinking-display-updates-2026-08-18,task-budgets-2026-03-13,garbage SPACE")
@@ -349,6 +366,8 @@ func TestTransformCountTokensStripsExtras(t *testing.T) {
 	Transform(body, TransformOptions{
 		Profile:     ProfileView{CLIVersion: "2.1.247", DefaultMaxTokens: 32000, MaxTokensUpper: 128000},
 		Persona:     PersonaCLI,
+		ClientID:    strings.Repeat("ab", 32),
+		SessionID:   "11111111-1111-4111-8111-111111111111",
 		CountTokens: true,
 	})
 	if _, ok := body["max_tokens"]; ok {
@@ -359,5 +378,8 @@ func TestTransformCountTokensStripsExtras(t *testing.T) {
 	}
 	if _, ok := body["temperature"]; ok {
 		t.Fatal("count_tokens must not forward temperature")
+	}
+	if _, ok := body["metadata"]; ok {
+		t.Fatal("count_tokens must not forward metadata")
 	}
 }

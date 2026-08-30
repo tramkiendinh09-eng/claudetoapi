@@ -31,7 +31,7 @@ import (
 var webFS embed.FS
 
 // version is reported by /admin/info and the console.
-const version = "0.5.8"
+const version = "0.5.9"
 
 func main() {
 	cfgPath := flag.String("c", "config.json", "path to config.json")
