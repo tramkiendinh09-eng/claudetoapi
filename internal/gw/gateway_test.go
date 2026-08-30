@@ -185,6 +185,40 @@ func TestThinkingSignatureRetryStripsBlocks(t *testing.T) {
 	}
 }
 
+func TestVersionMismatchStripsThinkingBeforeSend(t *testing.T) {
+	calls := 0
+	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		raw, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(raw), `"type":"thinking"`) {
+			t.Fatal("version mismatch must strip thinking before first hop")
+		}
+		w.Header().Set("content-type", "application/json")
+		fmt.Fprint(w, `{"id":"msg_1","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	acc := addAccount(t, st, "v1")
+	_ = st.Update(acc.ID, func(a *store.Account) {
+		a.Fingerprint = &store.Fingerprint{
+			ClientID: strings.Repeat("ab", 32), Entrypoint: "cli", Profile: "2.1.247",
+			UserAgent: "claude-cli/2.1.247 (external, cli)", SDKVersion: "0.208.0",
+			OS: "Linux", Arch: "arm64", Runtime: "node", RuntimeVersion: "v24.3.0",
+			UpdatedAt: time.Now().Unix(),
+		}
+	})
+	body := `{"model":"claude-opus-5","max_tokens":64,"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"thinking","thinking":"plan","signature":"deadbeef"},{"type":"text","text":"done"}]},{"role":"user","content":"next"}],"metadata":{"user_id":"{\"device_id\":\"x\"}"},"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.226.abc; cc_entrypoint=cli;"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	req.Header.Set("content-type", "application/json")
+	req.Header.Set("User-Agent", "claude-cli/2.1.226 (external, cli)")
+	w := httptest.NewRecorder()
+	g.handleMessages(w, req, false)
+	if w.Code != 200 {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	if calls != 1 {
+		t.Fatalf("calls=%d want 1", calls)
+	}
+}
+
 func Test429CooldownAndFailover(t *testing.T) {
 	calls := 0
 	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
