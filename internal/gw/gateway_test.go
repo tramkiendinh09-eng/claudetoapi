@@ -185,7 +185,7 @@ func TestThinkingSignatureRetryStripsBlocks(t *testing.T) {
 	}
 }
 
-func TestIsCCFreezesSignatureSurface(t *testing.T) {
+func TestIsCCMismatchStripsThinkingAndAlignsIdentity(t *testing.T) {
 	calls := 0
 	var gotBody, gotBeta, gotUA string
 	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -194,11 +194,14 @@ func TestIsCCFreezesSignatureSurface(t *testing.T) {
 		gotBody = string(raw)
 		gotBeta = r.Header.Get("anthropic-beta")
 		gotUA = r.Header.Get("User-Agent")
-		if !strings.Contains(gotBody, `"type":"thinking"`) {
-			t.Fatal("signed thinking must ride the first hop")
+		if strings.Contains(gotBody, `"type":"thinking"`) {
+			t.Fatal("version mismatch must strip thinking before first hop")
 		}
-		if !strings.Contains(gotBody, "cc_version=2.1.226.abc") {
-			t.Fatal("IsCC must not rewrite inbound cc_version")
+		if strings.Contains(gotBody, "cc_version=2.1.226") {
+			t.Fatal("mismatch must rewrite cc_version onto sticky CLI")
+		}
+		if !strings.Contains(gotBody, "cc_version=2.1.247.") {
+			t.Fatal("sticky cc_version missing")
 		}
 		w.Header().Set("content-type", "application/json")
 		fmt.Fprint(w, `{"id":"msg_1","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`)
@@ -212,7 +215,7 @@ func TestIsCCFreezesSignatureSurface(t *testing.T) {
 			UpdatedAt: time.Now().Unix(),
 		}
 	})
-	body := `{"model":"claude-opus-5","max_tokens":64,"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"thinking","thinking":"plan","signature":"deadbeef"},{"type":"text","text":"done"}]},{"role":"user","content":"next"}],"metadata":{"user_id":"{\"device_id\":\"x\"}"},"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.226.abc; cc_entrypoint=cli;"}]}`
+	body := `{"model":"claude-opus-5","max_tokens":64,"thinking":{"type":"enabled","budget_tokens":32},"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"thinking","thinking":"plan","signature":"deadbeef"},{"type":"text","text":"done"}]},{"role":"user","content":"next"}],"metadata":{"user_id":"{\"device_id\":\"x\"}"},"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.226.abc; cc_entrypoint=cli;"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("User-Agent", "claude-cli/2.1.226 (external, cli)")
@@ -228,8 +231,85 @@ func TestIsCCFreezesSignatureSurface(t *testing.T) {
 	if gotUA != "claude-cli/2.1.247 (external, cli)" {
 		t.Fatalf("sticky UA lost: %s", gotUA)
 	}
-	if strings.Contains(gotBeta, "thinking-display-updates") {
-		t.Fatalf("must not inject display-updates onto 2.1.226 inbound: %s", gotBeta)
+	if !strings.Contains(gotBeta, "thinking-display-updates-2026-08-18") {
+		t.Fatalf("sticky 2.1.247 must send display-updates: %s", gotBeta)
+	}
+}
+
+func TestIsCCMatchingKeepsThinkingSuffix(t *testing.T) {
+	calls := 0
+	var gotBody, gotBeta string
+	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		raw, _ := io.ReadAll(r.Body)
+		gotBody = string(raw)
+		gotBeta = r.Header.Get("anthropic-beta")
+		if !strings.Contains(gotBody, `"type":"thinking"`) {
+			t.Fatal("matching CLI must keep signed thinking")
+		}
+		if !strings.Contains(gotBody, "cc_version=2.1.247.abc") {
+			t.Fatal("matching CLI must keep cc_version suffix")
+		}
+		w.Header().Set("content-type", "application/json")
+		fmt.Fprint(w, `{"id":"msg_1","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	acc := addAccount(t, st, "v247")
+	_ = st.Update(acc.ID, func(a *store.Account) {
+		a.Fingerprint = &store.Fingerprint{
+			ClientID: strings.Repeat("ab", 32), Entrypoint: "cli", Profile: "2.1.247",
+			UserAgent: "claude-cli/2.1.247 (external, cli)", SDKVersion: "0.208.0",
+			OS: "Linux", Arch: "arm64", Runtime: "node", RuntimeVersion: "v24.3.0",
+			UpdatedAt: time.Now().Unix(),
+		}
+	})
+	body := `{"model":"claude-opus-5","max_tokens":64,"thinking":{"type":"enabled","budget_tokens":32},"messages":[{"role":"user","content":"hello world from claudetoapi!"},{"role":"assistant","content":[{"type":"thinking","thinking":"plan","signature":"deadbeef"},{"type":"text","text":"done"}]},{"role":"user","content":"next"}],"metadata":{"user_id":"{\"device_id\":\"x\"}"},"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.247.abc; cc_entrypoint=cli;"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	req.Header.Set("content-type", "application/json")
+	req.Header.Set("User-Agent", "claude-cli/2.1.247 (external, cli)")
+	req.Header.Set("anthropic-beta", "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-display-updates-2026-08-18,task-budgets-2026-03-13")
+	w := httptest.NewRecorder()
+	g.handleMessages(w, req, false)
+	if w.Code != 200 {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	if calls != 1 {
+		t.Fatalf("calls=%d want 1", calls)
+	}
+	if strings.Contains(gotBeta, "task-budgets-2026-03-13") {
+		t.Fatalf("IsCC must not merge inbound extra betas: %s", gotBeta)
+	}
+	if !strings.Contains(gotBeta, "thinking-display-updates-2026-08-18") {
+		t.Fatalf("sticky betas missing display-updates: %s", gotBeta)
+	}
+}
+
+func TestPickPrefersMatchingCLIVersion(t *testing.T) {
+	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"id":"msg_1","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	aOld := addAccount(t, st, "old")
+	aNew := addAccount(t, st, "new")
+	_ = st.Update(aOld.ID, func(a *store.Account) {
+		a.Fingerprint = &store.Fingerprint{
+			ClientID: strings.Repeat("aa", 32), Entrypoint: "cli", Profile: "2.1.241",
+			UserAgent: "claude-cli/2.1.241 (external, cli)", SDKVersion: "0.208.0",
+			OS: "Linux", Arch: "arm64", Runtime: "node", RuntimeVersion: "v24.3.0",
+		}
+	})
+	_ = st.Update(aNew.ID, func(a *store.Account) {
+		a.Fingerprint = &store.Fingerprint{
+			ClientID: strings.Repeat("bb", 32), Entrypoint: "cli", Profile: "2.1.247",
+			UserAgent: "claude-cli/2.1.247 (external, cli)", SDKVersion: "0.208.0",
+			OS: "Linux", Arch: "arm64", Runtime: "node", RuntimeVersion: "v24.3.0",
+		}
+	})
+	got := g.pick("", map[int64]bool{}, "claude-cli/2.1.241 (external, cli)")
+	if got == nil || got.ID != aOld.ID {
+		t.Fatalf("want 2.1.241 account, got %+v", got)
+	}
+	got = g.pick("", map[int64]bool{}, "claude-cli/2.1.247 (external, cli)")
+	if got == nil || got.ID != aNew.ID {
+		t.Fatalf("want 2.1.247 account, got %+v", got)
 	}
 }
 

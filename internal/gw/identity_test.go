@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"claudetoapi/internal/profile"
 	"claudetoapi/internal/store"
 )
 
@@ -50,7 +49,7 @@ func TestVersionTripleOfficialSuffix(t *testing.T) {
 	}
 }
 
-func TestFingerprintIgnoresInboundUAAndUpgradesProfile(t *testing.T) {
+func TestFingerprintIgnoresInboundUAAndFreezesProfile(t *testing.T) {
 	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
 		fmt.Fprint(w, `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
@@ -70,11 +69,11 @@ func TestFingerprintIgnoresInboundUAAndUpgradesProfile(t *testing.T) {
 	acc, _ = st.Get(acc.ID)
 
 	fp, prof := g.resolveFingerprint(acc, "claude-cli/2.1.246 (external, cli)")
-	if prof.CLIVersion != "2.1.247" {
-		t.Fatalf("profile = %s", prof.CLIVersion)
+	if prof.CLIVersion != "2.1.241" {
+		t.Fatalf("frozen profile = %s", prof.CLIVersion)
 	}
-	if fp.UserAgent != profile.Default.UserAgent {
-		t.Fatalf("did not upgrade sticky UA, got %q", fp.UserAgent)
+	if fp.UserAgent != "claude-cli/2.1.241 (external, cli)" {
+		t.Fatalf("sticky UA mutated, got %q", fp.UserAgent)
 	}
 	if strings.Contains(fp.UserAgent, "2.1.246") {
 		t.Fatal("inbound 2.1.246 must not be adopted")
@@ -83,9 +82,8 @@ func TestFingerprintIgnoresInboundUAAndUpgradesProfile(t *testing.T) {
 		t.Fatalf("sticky platform = %s/%s", fp.OS, fp.Arch)
 	}
 
-	// Second call with a totally different inbound UA still sticks.
 	fp2, _ := g.resolveFingerprint(acc, "Go-http-client/2.0")
-	if fp2.UserAgent != profile.Default.UserAgent {
+	if fp2.UserAgent != "claude-cli/2.1.241 (external, cli)" {
 		t.Fatalf("sticky UA drifted to %q", fp2.UserAgent)
 	}
 }
@@ -123,8 +121,8 @@ func TestPoolIdentityStampsFingerprintForGenuineCLI(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("status %d: %s", w.Code, w.Body.String())
 	}
-	if gotUA != "claude-cli/2.1.247 (external, cli)" {
-		t.Fatalf("upstream UA = %q, want sticky 2.1.247", gotUA)
+	if gotUA != "claude-cli/2.1.241 (external, cli)" {
+		t.Fatalf("upstream UA = %q, want frozen sticky 2.1.241", gotUA)
 	}
 	if gotOS != "Linux" || gotArch != "arm64" {
 		t.Fatalf("upstream stainless = %s/%s (inbound Windows/x64 must not leak)", gotOS, gotArch)

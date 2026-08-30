@@ -28,6 +28,10 @@ type BetaOptions struct {
 	CacheTTL1h bool
 	// FastMode (body speed=fast on Opus 5 / 4.8).
 	FastMode bool
+	// CLIVersion gates capability betas that only exist from a given
+	// release (thinking-display-updates is 2.1.247+). Empty means the
+	// current Default profile.
+	CLIVersion string
 }
 
 // ComputeBetas returns the anthropic-beta header value in the CLI's push
@@ -50,9 +54,11 @@ func ComputeBetas(model string, o BetaOptions) string {
 		}
 		betas = append(betas, profile.BetaContextManagement)
 		// 2.1.247 payload registry: thinking-display-updates rides with
-		// interleaved thinking. Dropping it invalidates signatures the CLI
-		// already minted under this beta (Invalid `signature` in `thinking`).
-		betas = append(betas, profile.BetaThinkingDisplay)
+		// interleaved thinking. Older CLIs never sent it; injecting it
+		// onto a 2.1.226-signed history 400s.
+		if thinkingDisplayBeta(o.CLIVersion) {
+			betas = append(betas, profile.BetaThinkingDisplay)
+		}
 	}
 	// prompt-caching-scope: first-party default-on.
 	betas = append(betas, profile.BetaPromptCachingScope)
@@ -70,6 +76,36 @@ func ComputeBetas(model string, o BetaOptions) string {
 		betas = append(betas, profile.BetaFastMode)
 	}
 	return strings.Join(dedupe(betas), ",")
+}
+
+// thinkingDisplayBeta is on for empty (Default 2.1.247) and for 2.1.247+.
+func thinkingDisplayBeta(cliVersion string) bool {
+	ver := strings.TrimSpace(cliVersion)
+	if ver == "" {
+		return true
+	}
+	parts := strings.Split(ver, ".")
+	if len(parts) < 3 {
+		return true
+	}
+	var t [3]int
+	for i := 0; i < 3; i++ {
+		n := 0
+		for _, c := range parts[i] {
+			if c < '0' || c > '9' {
+				return true
+			}
+			n = n*10 + int(c-'0')
+		}
+		t[i] = n
+	}
+	if t[0] != 2 {
+		return t[0] > 2
+	}
+	if t[1] != 1 {
+		return t[1] > 1
+	}
+	return t[2] >= 247
 }
 
 // FreezeBetas uses the inbound anthropic-beta list as the signature surface

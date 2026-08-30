@@ -165,7 +165,9 @@ func NewUUID() string {
 }
 
 var ccVersionRe = regexp.MustCompile(`cc_version=\d+\.\d+\.\d+\.[0-9a-fA-F]{3}`)
+var ccVersionCapRe = regexp.MustCompile(`cc_version=(\d+\.\d+\.\d+)\.([0-9a-fA-F]{3})`)
 var ccEntrypointRe = regexp.MustCompile(`cc_entrypoint=[^;]*`)
+var ccEntrypointCapRe = regexp.MustCompile(`cc_entrypoint=([^;]*)`)
 
 // AlignBillingCLIVersion rewrites cc_version in a genuine CLI body so it
 // matches the account's sticky CLI version (fingerprint recomputed with
@@ -257,6 +259,49 @@ func rewriteBillingEntrypoint(text, repl string) (string, bool) {
 		return text, false
 	}
 	return next, true
+}
+
+// BillingCLIVersion returns the cc_version triple and 3-hex fingerprint
+// from a genuine CLI billing block.
+func BillingCLIVersion(body map[string]any) (ver, fp string, ok bool) {
+	m := ccVersionCapRe.FindStringSubmatch(billingHeaderText(body))
+	if len(m) != 3 {
+		return "", "", false
+	}
+	return m[1], m[2], true
+}
+
+// BillingEntrypoint returns cc_entrypoint from a genuine CLI billing block.
+func BillingEntrypoint(body map[string]any) string {
+	m := ccEntrypointCapRe.FindStringSubmatch(billingHeaderText(body))
+	if len(m) != 2 {
+		return ""
+	}
+	return strings.TrimSpace(m[1])
+}
+
+func billingHeaderText(body map[string]any) string {
+	if body == nil {
+		return ""
+	}
+	switch sys := body["system"].(type) {
+	case string:
+		if strings.Contains(sys, "x-anthropic-billing-header:") {
+			return sys
+		}
+	case []any:
+		for _, b := range sys {
+			blk, ok := b.(map[string]any)
+			if !ok {
+				continue
+			}
+			t, _ := blk["text"].(string)
+			if strings.Contains(t, "x-anthropic-billing-header:") {
+				return t
+			}
+		}
+	}
+	return ""
 }
 
 // HasBillingBlock reports whether a decoded system array already carries a

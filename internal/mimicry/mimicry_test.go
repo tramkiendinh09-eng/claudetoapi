@@ -78,6 +78,14 @@ func TestComputeBetasP0Rules(t *testing.T) {
 	if strings.Contains(off, "thinking-display-updates") {
 		t.Fatalf("non-thinking requests must not carry thinking-display-updates: %s", off)
 	}
+	old := ComputeBetas("claude-sonnet-4-5", BetaOptions{ThinkingEnabled: true, CLIVersion: "2.1.226"})
+	if strings.Contains(old, "thinking-display-updates") {
+		t.Fatalf("2.1.226 must not carry thinking-display-updates: %s", old)
+	}
+	cur := ComputeBetas("claude-sonnet-4-5", BetaOptions{ThinkingEnabled: true, CLIVersion: "2.1.247"})
+	if !strings.Contains(cur, "thinking-display-updates-2026-08-18") {
+		t.Fatalf("2.1.247 must carry thinking-display-updates: %s", cur)
+	}
 }
 
 func TestFreezeBetasKeepsInboundOmitsComputedExtras(t *testing.T) {
@@ -234,6 +242,21 @@ func TestNormalizeDateline(t *testing.T) {
 	}
 	if NormalizeDateline(body2) {
 		t.Fatal("message text outside <system-reminder> must not be touched")
+	}
+}
+
+func TestBillingCLIVersionParse(t *testing.T) {
+	body := map[string]any{
+		"system": []any{
+			map[string]any{"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.226.abc; cc_entrypoint=cli;"},
+		},
+	}
+	ver, fp, ok := BillingCLIVersion(body)
+	if !ok || ver != "2.1.226" || fp != "abc" {
+		t.Fatalf("ver=%s fp=%s ok=%v", ver, fp, ok)
+	}
+	if BillingEntrypoint(body) != "cli" {
+		t.Fatalf("entrypoint=%s", BillingEntrypoint(body))
 	}
 }
 

@@ -293,29 +293,48 @@ func (g *Gateway) geoFor(acc *store.Account) geoIdentity {
 
 var errNoAccounts = errors.New("no available accounts")
 
-// pick chooses an account: sticky first, then least-recently-used active.
-func (g *Gateway) pick(sessionHash string, exclude map[int64]bool) *store.Account {
+// pick chooses an account: session sticky first, then an account whose
+// frozen CLI version matches the inbound UA (so a 2.1.226 client does not
+// land on a 2.1.247 token), then least-recently-used active.
+func (g *Gateway) pick(sessionHash string, exclude map[int64]bool, inboundUA string) *store.Account {
 	now := time.Now()
 	if id, ok := g.chain.Sticky(sessionHash); ok && !exclude[id] {
 		if acc, err := g.st.Get(id); err == nil && acc.Active(now) {
 			return acc
 		}
 	}
-	var best *store.Account
+	want, wantOK := versionTriple(inboundUA)
+	var best, matched *store.Account
 	for _, acc := range g.st.Snapshot() {
 		if exclude[acc.ID] || !acc.Active(now) {
 			continue
 		}
-		if best == nil {
-			best = acc
-			continue
+		if wantOK && acc.Fingerprint != nil {
+			if got, ok := versionTriple(acc.Fingerprint.UserAgent); ok && got == want {
+				if olderUsed(acc, matched) {
+					matched = acc
+				}
+			}
 		}
-		bt, at := best.LastUsedAt, acc.LastUsedAt
-		if at == nil || (bt != nil && at.Before(*bt)) {
+		if olderUsed(acc, best) {
 			best = acc
 		}
 	}
+	if matched != nil {
+		return matched
+	}
 	return best
+}
+
+func olderUsed(acc, best *store.Account) bool {
+	if acc == nil {
+		return false
+	}
+	if best == nil {
+		return true
+	}
+	at, bt := acc.LastUsedAt, best.LastUsedAt
+	return at == nil || (bt != nil && at.Before(*bt))
 }
 
 // ---- fingerprint resolution ----
@@ -323,47 +342,36 @@ func (g *Gateway) pick(sessionHash string, exclude map[int64]bool) *store.Accoun
 // resolveFingerprint returns the per-account identity, creating it lazily.
 // Inbound client UAs are never adopted onto a pool OAuth account — the same
 // token presenting 2.1.246 Windows passthrough and 2.1.241 Linux/arm64 mimic
-// is what got an account banned. CLI version may ride a one-way upgrade to
-// the configured profile; OS/arch/runtime stay sticky.
+// is what got an account banned. The stored fingerprint is frozen: a live
+// token must not jump CLI versions just because Default moved.
 func (g *Gateway) resolveFingerprint(acc *store.Account, clientUA string) (fp *store.Fingerprint, prof *profile.Profile) {
-	prof = profile.Lookup(g.cfg.ProfileName)
-
 	if acc.Fingerprint != nil && acc.Fingerprint.ClientID != "" {
 		fp = acc.Fingerprint
+		prof = profileFromFingerprint(fp, profile.Lookup(g.cfg.ProfileName))
 		if inbound := strings.TrimSpace(clientUA); inbound != "" && inbound != orDefault(fp.UserAgent, prof.UserAgent) {
 			slog.Debug("identity_unify_ignore_inbound_ua",
 				"account_id", acc.ID,
 				"inbound", shortUA(inbound),
 				"sticky", shortUA(orDefault(fp.UserAgent, prof.UserAgent)))
 		}
-		upgraded := upgradeFingerprint(fp, prof)
 		missingPlatform := fp.OS == "" || fp.Arch == "" || fp.Runtime == "" || fp.RuntimeVersion == ""
-		if upgraded != nil {
-			fp.UserAgent = upgraded.UserAgent
-			fp.SDKVersion = upgraded.SDKVersion
-			fp.Profile = upgraded.Profile
-			fp.UpdatedAt = upgraded.UpdatedAt
-		}
 		seedStickyPlatform(fp, prof)
-		if upgraded != nil || missingPlatform {
+		if missingPlatform {
 			snap := *fp
 			_ = g.st.Update(acc.ID, func(a *store.Account) {
 				if a.Fingerprint == nil {
 					return
 				}
-				a.Fingerprint.UserAgent = snap.UserAgent
-				a.Fingerprint.SDKVersion = snap.SDKVersion
-				a.Fingerprint.Profile = snap.Profile
 				a.Fingerprint.OS = snap.OS
 				a.Fingerprint.Arch = snap.Arch
 				a.Fingerprint.Runtime = snap.Runtime
 				a.Fingerprint.RuntimeVersion = snap.RuntimeVersion
-				a.Fingerprint.UpdatedAt = snap.UpdatedAt
 			})
 		}
 		return fp, prof
 	}
 
+	prof = profile.Lookup(g.cfg.ProfileName)
 	entry := g.cfg.Mimicry.DefaultEntrypoint
 	if entry == "" {
 		entry = "cli"
@@ -371,6 +379,36 @@ func (g *Gateway) resolveFingerprint(acc *store.Account, clientUA string) (fp *s
 	newFP := newStickyFingerprint(prof, entry)
 	_ = g.st.Update(acc.ID, func(a *store.Account) { a.Fingerprint = newFP })
 	return newFP, prof
+}
+
+// profileFromFingerprint rebuilds the Profile view from the frozen account
+// identity. Unknown stored profile names fall back to cfg Default for
+// stainless defaults, then overlay UA / SDK / CLI version from the fingerprint
+// so billing and betas never disagree with the sticky User-Agent.
+func profileFromFingerprint(fp *store.Fingerprint, fallback *profile.Profile) *profile.Profile {
+	if fallback == nil {
+		fallback = profile.Default
+	}
+	base := fallback
+	if fp != nil && fp.Profile != "" {
+		if p, ok := profile.Registry[fp.Profile]; ok {
+			base = p
+		}
+	}
+	out := *base
+	if fp == nil {
+		return &out
+	}
+	if fp.UserAgent != "" {
+		out.UserAgent = fp.UserAgent
+	}
+	if fp.SDKVersion != "" {
+		out.SDKVersion = fp.SDKVersion
+	}
+	if v, ok := cliVersionFromUA(out.UserAgent); ok {
+		out.CLIVersion = v
+	}
+	return &out
 }
 
 func newStickyFingerprint(prof *profile.Profile, entrypoint string) *store.Fingerprint {
@@ -518,7 +556,7 @@ func (g *Gateway) handleMessages(w http.ResponseWriter, r *http.Request, countTo
 	attempts := g.cfg.Mimicry.MaxAttempts
 	var lastRL *rateLimitEcho
 	for i := 0; i < attempts; i++ {
-		acc := g.pick(sessionHash, exclude)
+		acc := g.pick(sessionHash, exclude, clientUA)
 		if acc == nil {
 			g.writeGiveUp(w, lastRL)
 			return
@@ -690,40 +728,6 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 	promptID, prevReqID, _ := g.chain.Next(opts.SessionHash)
 	isNewConversation := prevReqID == ""
 
-	thinkingOn := hasThinking(body)
-	signedThinking := mimicry.HasSignedThinking(body)
-	fastMode := false
-	if sp, _ := body["speed"].(string); strings.EqualFold(sp, "fast") {
-		fastMode = true
-	}
-	beta := mimicry.ComputeBetas(opts.Model, mimicry.BetaOptions{
-		ThinkingEnabled: thinkingOn || signedThinking,
-		RedactThinking:  g.cfg.Mimicry.RedactThinking,
-		CountTokens:     opts.CountTokens,
-		Auxiliary:       opts.CountTokens,
-		CacheTTL1h:      cacheTTLIs1h(body),
-		FastMode:        fastMode,
-	})
-	if in := opts.ClientHeaders.Get("anthropic-beta"); in != "" {
-		if opts.IsCC {
-			// Real CLI: the inbound list is what signed historical thinking.
-			// MergeBetas would UNION computed 2.1.247 extras onto a 2.1.226
-			// request and 400 the next turn.
-			beta = mimicry.FreezeBetas(in, beta)
-		} else {
-			beta = mimicry.MergeBetas(beta, in)
-		}
-	}
-	// First turn of a conversation: emit the input_prompt telemetry marker
-	// (carries the chain's cc_prompt_id, exactly like the captured stream).
-	if g.telemetry != nil && isNewConversation {
-		sid := sessionUUID(opts.SessionHash)
-		if sid == "" {
-			sid = promptID
-		}
-		g.telemetry.NotifyConversationStart(acc, sid, opts.Model, beta, promptID, len(mimicry.FirstUserText(body)))
-	}
-
 	if !opts.IsCC {
 		attribution := mimicry.BuildAttribution(mimicry.AttributionOptions{
 			CLIVersion:  prof.CLIVersion,
@@ -755,10 +759,45 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 			CountTokens: opts.CountTokens,
 		})
 	} else {
-		// Real CLI traffic: sticky identity is headers + metadata.user_id
-		// only. cc_version / cc_entrypoint / extra anthropic-beta tokens are
-		// signature-bound; rewriting a 2.1.226 body onto a 2.1.247 sticky
-		// profile 400s "Invalid signature in thinking block" every turn.
+		// Real CLI: sticky identity is complete (UA + billing + betas).
+		// Signed thinking is bound to that surface — if inbound CLI version
+		// or billing disagrees, strip thinking before the first hop so
+		// Anthropic never 400s and the token never presents two releases.
+		stickyUA := orDefault(fp.UserAgent, prof.UserAgent)
+		inUA := opts.ClientHeaders.Get("User-Agent")
+		bodyVer, _, bodyVerOK := mimicry.BillingCLIVersion(body)
+		bodyEP := mimicry.BillingEntrypoint(body)
+		signedThinking := mimicry.HasSignedThinking(body)
+		identityMismatch := false
+		if signedThinking {
+			if cliVersionMismatch(inUA, stickyUA) {
+				identityMismatch = true
+			}
+			if bodyVerOK && bodyVer != prof.CLIVersion {
+				identityMismatch = true
+			}
+			if bodyEP != "" && fp.Entrypoint != "" && bodyEP != fp.Entrypoint {
+				identityMismatch = true
+			}
+		}
+		if identityMismatch {
+			if mimicry.StripThinkingBlocks(body) {
+				slog.Warn("thinking_strip_identity_mismatch",
+					"account_id", acc.ID,
+					"inbound", shortUA(inUA),
+					"sticky", shortUA(stickyUA),
+					"body_cc", bodyVer,
+					"sticky_cc", prof.CLIVersion,
+					"body_ep", bodyEP,
+					"sticky_ep", fp.Entrypoint)
+			}
+		}
+		if !signedThinking || identityMismatch || !bodyVerOK || bodyVer != prof.CLIVersion {
+			mimicry.AlignBillingCLIVersion(body, prof.CLIVersion)
+		}
+		if fp.Entrypoint != "" {
+			mimicry.AlignBillingEntrypoint(body, fp.Entrypoint)
+		}
 		if fp.ClientID != "" {
 			sid := sessionUUID(SessionHash(body))
 			if sid == "" {
@@ -770,6 +809,36 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 
 	if opts.CountTokens {
 		mimicry.StripCountTokensExtras(body)
+	}
+
+	thinkingOn := hasThinking(body)
+	signedThinking := mimicry.HasSignedThinking(body)
+	fastMode := false
+	if sp, _ := body["speed"].(string); strings.EqualFold(sp, "fast") {
+		fastMode = true
+	}
+	beta := mimicry.ComputeBetas(opts.Model, mimicry.BetaOptions{
+		ThinkingEnabled: thinkingOn || signedThinking,
+		RedactThinking:  g.cfg.Mimicry.RedactThinking,
+		CountTokens:     opts.CountTokens,
+		Auxiliary:       opts.CountTokens,
+		CacheTTL1h:      cacheTTLIs1h(body),
+		FastMode:        fastMode,
+		CLIVersion:      prof.CLIVersion,
+	})
+	if !opts.IsCC {
+		if in := opts.ClientHeaders.Get("anthropic-beta"); in != "" {
+			beta = mimicry.MergeBetas(beta, in)
+		}
+	}
+	// First turn of a conversation: emit the input_prompt telemetry marker
+	// (carries the chain's cc_prompt_id, exactly like the captured stream).
+	if g.telemetry != nil && isNewConversation {
+		sid := sessionUUID(opts.SessionHash)
+		if sid == "" {
+			sid = promptID
+		}
+		g.telemetry.NotifyConversationStart(acc, sid, opts.Model, beta, promptID, len(mimicry.FirstUserText(body)))
 	}
 
 	// OAuth non-stream /v1/messages is its own RPM lane and 429s with no
@@ -1348,6 +1417,14 @@ func newerVersion(newUA, oldUA string) bool {
 		}
 	}
 	return false
+}
+
+func cliVersionFromUA(ua string) (string, bool) {
+	t, ok := versionTriple(ua)
+	if !ok {
+		return "", false
+	}
+	return fmt.Sprintf("%d.%d.%d", t[0], t[1], t[2]), true
 }
 
 func extractProduct(ua string) string {
