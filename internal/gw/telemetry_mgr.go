@@ -51,6 +51,12 @@ func (m *TelemetryManager) EnsureStarted(acc *store.Account, accessToken string)
 	ua := orDefault(fp.UserAgent, prof.UserAgent)
 	runtimeVer := orDefault(fp.RuntimeVersion, prof.Stainless["X-Stainless-Runtime-Version"])
 	env := telemetry.DefaultEnv(runtimeVer, prof.BuildTime)
+	if fp.Terminal != "" {
+		env.Terminal = fp.Terminal
+	}
+	if fp.Shell != "" {
+		env.Shell = fp.Shell
+	}
 	if fp.OS != "" {
 		switch strings.ToLower(fp.OS) {
 		case "linux":

@@ -35,6 +35,8 @@ type Fingerprint struct {
 	Arch           string `json:"arch,omitempty"`             // X-Stainless-Arch, sticky
 	Runtime        string `json:"runtime,omitempty"`          // X-Stainless-Runtime, sticky
 	RuntimeVersion string `json:"runtime_version,omitempty"`  // X-Stainless-Runtime-Version, sticky
+	Terminal       string `json:"terminal,omitempty"`         // telemetry env.terminal
+	Shell          string `json:"shell,omitempty"`            // telemetry env.shell
 	UpdatedAt      int64  `json:"updated_at"`
 }
 

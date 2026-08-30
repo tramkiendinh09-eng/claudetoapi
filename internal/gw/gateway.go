@@ -356,7 +356,7 @@ func (g *Gateway) resolveFingerprint(acc *store.Account, clientUA string) (fp *s
 				"sticky", shortUA(orDefault(fp.UserAgent, target.UserAgent)))
 		}
 		upgraded := upgradeFingerprint(fp, target)
-		missingPlatform := fp.OS == "" || fp.Arch == "" || fp.Runtime == "" || fp.RuntimeVersion == ""
+		missingPlatform := fp.OS == "" || fp.Arch == "" || fp.Runtime == "" || fp.RuntimeVersion == "" || fp.Terminal == "" || fp.Shell == ""
 		if upgraded != nil {
 			fp.UserAgent = upgraded.UserAgent
 			fp.SDKVersion = upgraded.SDKVersion
@@ -364,6 +364,7 @@ func (g *Gateway) resolveFingerprint(acc *store.Account, clientUA string) (fp *s
 			fp.UpdatedAt = upgraded.UpdatedAt
 		}
 		prof = profileFromFingerprint(fp, target)
+		applyMachinePersona(fp)
 		seedStickyPlatform(fp, prof)
 		if upgraded != nil || missingPlatform {
 			snap := *fp
@@ -378,6 +379,8 @@ func (g *Gateway) resolveFingerprint(acc *store.Account, clientUA string) (fp *s
 				a.Fingerprint.Arch = snap.Arch
 				a.Fingerprint.Runtime = snap.Runtime
 				a.Fingerprint.RuntimeVersion = snap.RuntimeVersion
+				a.Fingerprint.Terminal = snap.Terminal
+				a.Fingerprint.Shell = snap.Shell
 				a.Fingerprint.UpdatedAt = snap.UpdatedAt
 			})
 		}
@@ -433,6 +436,7 @@ func newStickyFingerprint(prof *profile.Profile, entrypoint string) *store.Finge
 		SDKVersion: prof.SDKVersion,
 		UpdatedAt:  time.Now().Unix(),
 	}
+	applyMachinePersona(fp)
 	seedStickyPlatform(fp, prof)
 	return fp
 }

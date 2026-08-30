@@ -166,6 +166,29 @@ func TestNewAccountSeedsLinuxX64(t *testing.T) {
 	if accs[0].Fingerprint.Arch != "x64" {
 		t.Fatalf("stored arch = %q", accs[0].Fingerprint.Arch)
 	}
+	if accs[0].Fingerprint.Terminal == "" || accs[0].Fingerprint.Shell == "" || accs[0].Fingerprint.RuntimeVersion == "" {
+		t.Fatalf("machine persona incomplete: %+v", accs[0].Fingerprint)
+	}
+}
+
+func TestTwoNewAccountsGetDifferentPersonasOrDeviceIDs(t *testing.T) {
+	g, _, st := newTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		fmt.Fprint(w, `{"id":"msg_1","content":[{"type":"text","text":"ok"}]}`)
+	}))
+	a := addAccount(t, st, "a")
+	b := addAccount(t, st, "b")
+	fa, _ := g.resolveFingerprint(a, "")
+	fb, _ := g.resolveFingerprint(b, "")
+	if fa.ClientID == fb.ClientID {
+		t.Fatal("device_id collision")
+	}
+	if fa.Arch != "x64" || fb.Arch != "x64" {
+		t.Fatalf("new accounts want x64, got %s/%s", fa.Arch, fb.Arch)
+	}
+	if fa.RuntimeVersion == "" || fa.Terminal == "" || fa.Shell == "" {
+		t.Fatalf("persona a incomplete: %+v", fa)
+	}
 }
 
 func TestExistingArm64FingerprintNotReseededToX64(t *testing.T) {
