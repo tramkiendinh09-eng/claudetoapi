@@ -88,7 +88,7 @@ const (
 // CLI's own regex gating.
 func BuildAttribution(o AttributionOptions) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=%s;",
+	fmt.Fprintf(&b, "x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=%s; cch=00000;",
 		o.CLIVersion, o.Fingerprint, o.Entrypoint)
 	if o.Workload != "" {
 		fmt.Fprintf(&b, " cc_workload=%s;", o.Workload)

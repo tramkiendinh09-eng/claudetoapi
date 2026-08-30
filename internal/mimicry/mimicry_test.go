@@ -31,7 +31,7 @@ func TestBuildAttributionChain(t *testing.T) {
 		PrevReqID:   "req_abcdefghij0123456789AB",
 		PromptID:    "474107af-f17f-4ffc-a02a-1f017c7ae71f",
 	})
-	want := "x-anthropic-billing-header: cc_version=2.1.241.abc; cc_entrypoint=cli;" +
+	want := "x-anthropic-billing-header: cc_version=2.1.241.abc; cc_entrypoint=cli; cch=00000;" +
 		" cc_prev_req=req_abcdefghij0123456789AB; cc_prompt_id=474107af-f17f-4ffc-a02a-1f017c7ae71f;"
 	if at != want {
 		t.Fatalf("attribution mismatch:\n got %s\nwant %s", at, want)

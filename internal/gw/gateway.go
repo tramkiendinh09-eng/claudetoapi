@@ -886,10 +886,14 @@ func (g *Gateway) forwardOnce(w http.ResponseWriter, r *http.Request, acc *store
 	var resp *http.Response
 	var lastPayload []byte
 	for {
+		mimicry.EnsureCCHPlaceholder(body)
 		payload, err := mimicry.EncodeBody(body)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "api_error", "encode body: "+err.Error())
 			return true, nil
+		}
+		if sealed, err := mimicry.SealCCH(payload); err == nil {
+			payload = sealed
 		}
 		lastPayload = payload
 		upstream, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(payload))
